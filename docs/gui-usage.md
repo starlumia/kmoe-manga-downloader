@@ -46,17 +46,19 @@ scripts\build_windows.bat
 3. 生成 Windows GUI 与后台 CLI。
 4. 把可运行目录复制到桌面。
 
-构建产物位于：
+临时构建产物位于：
 
 ```text
-dist\Kmoe Manga Downloader\
+%TEMP%\kmoe-manga-downloader-build\dist\Kmoe Manga Downloader\
 ```
 
-如果仓库在 WSL 路径下，脚本还会复制一份到：
+脚本会复制一份到：
 
 ```text
 %USERPROFILE%\Desktop\Kmoe Manga Downloader\
 ```
+
+最终请使用桌面上的本地副本。这样可以避开 WSL 映射盘上的文件锁和 Python DLL 加载问题。
 
 ### 运行
 

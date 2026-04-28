@@ -15,6 +15,8 @@ scripts\build_windows.bat
 
 如果仓库位于 WSL 路径，例如 `\\wsl.localhost\Debian\...`，也可以直接运行该脚本。脚本使用 `pushd` 进入目录，Windows 会临时映射 UNC 路径，避免 CMD 回退到 `C:\Windows`。
 
+PyInstaller 的临时构建目录会放在 Windows 本地 `%TEMP%` 下，避免在 WSL 映射盘里清理 `build` 目录时出现 `PermissionError: [WinError 5] 拒绝访问`。
+
 脚本会自动按以下顺序选择解释器：
 
 1. `py -3.12`
@@ -26,31 +28,31 @@ scripts\build_windows.bat
 
 Python 3.14 可用于构建，但如果遇到第三方依赖或 PyInstaller 兼容性问题，优先回退到 Python 3.12。
 
-构建产物位于：
+临时构建产物位于：
 
 ```text
-dist\Kmoe Manga Downloader\
+%TEMP%\kmoe-manga-downloader-build\dist\Kmoe Manga Downloader\
 ```
 
-如果仓库位于 WSL 路径，脚本还会自动复制一份到 Windows 本地桌面：
+脚本会自动复制一份到 Windows 本地桌面：
 
 ```text
 %USERPROFILE%\Desktop\Kmoe Manga Downloader\
 ```
 
-把整个 `dist\Kmoe Manga Downloader` 目录压缩分发即可。目标机器不需要预装 Python 或依赖。
+把桌面上的整个 `Kmoe Manga Downloader` 目录压缩分发即可。目标机器不需要预装 Python 或依赖。
 
 ## 运行入口
 
-双击：
+双击桌面本地副本：
 
 ```text
-dist\Kmoe Manga Downloader\Kmoe Manga Downloader.exe
+%USERPROFILE%\Desktop\Kmoe Manga Downloader\Kmoe Manga Downloader.exe
 ```
 
 GUI 会自动调用同目录下的 `kmdr-cli.exe` 执行登录、搜索、下载等命令。
 
-如果从 `\\wsl.localhost\...` 下运行出现 `failed to load python DLL`，请运行脚本复制到桌面的本地副本：
+如果从 `\\wsl.localhost\...` 下运行出现 `failed to load python DLL`，请运行桌面的本地副本：
 
 ```text
 %USERPROFILE%\Desktop\Kmoe Manga Downloader\Kmoe Manga Downloader.exe
@@ -60,4 +62,5 @@ GUI 会自动调用同目录下的 `kmdr-cli.exe` 执行登录、搜索、下载
 
 - 不要只复制单个 exe；需要保留整个输出目录。
 - 用户配置仍写入当前用户主目录下的 `.kmdr`。
+- 如果脚本提示无法替换桌面目录，请先关闭正在运行的 `Kmoe Manga Downloader.exe` 后重试。
 - 如果需要单文件 exe，可以后续单独做 `--onefile` 版本，但启动速度会变慢，且调试和依赖定位更困难。
