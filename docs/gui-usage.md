@@ -42,9 +42,10 @@ scripts\build_windows.bat
 脚本会自动：
 
 1. 选择可用的 Python 3.12、3.11 或 3.14。
-2. 安装当前项目和 PyInstaller。
-3. 生成 Windows GUI 与后台 CLI。
-4. 把可运行目录复制到桌面。
+2. 在 Windows 本地临时目录创建隔离的构建虚拟环境。
+3. 安装运行依赖和 PyInstaller。
+4. 直接从源码生成 Windows GUI 与后台 CLI。
+5. 把可运行目录复制到桌面。
 
 临时构建产物位于：
 

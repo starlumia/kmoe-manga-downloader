@@ -1,14 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import sys
+
 from PyInstaller.utils.hooks import collect_submodules
 
+
+project_root = Path.cwd()
+src_path = str(project_root / "src")
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
 
 hiddenimports = collect_submodules("kmdr")
 common_datas = []
 
 cli = Analysis(
     ["src/kmdr/windows_cli.py"],
-    pathex=["."],
+    pathex=[str(project_root), src_path],
     binaries=[],
     datas=common_datas,
     hiddenimports=hiddenimports,
@@ -35,7 +43,7 @@ cli_exe = EXE(
 
 gui = Analysis(
     ["src/kmdr/windows_gui.py"],
-    pathex=["."],
+    pathex=[str(project_root), src_path],
     binaries=[],
     datas=common_datas,
     hiddenimports=hiddenimports,

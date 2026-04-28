@@ -32,6 +32,8 @@ echo Using Python:
 set "BUILD_ROOT=%TEMP%\kmoe-manga-downloader-build"
 set "BUILD_WORK=%BUILD_ROOT%\build"
 set "BUILD_DIST=%BUILD_ROOT%\dist"
+set "VENV_DIR=%BUILD_ROOT%\venv"
+set "BUILD_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "PACKAGE_DIR=%BUILD_DIST%\Kmoe Manga Downloader"
 
 if exist "%BUILD_ROOT%" rmdir /s /q "%BUILD_ROOT%"
@@ -55,21 +57,33 @@ mkdir "%BUILD_DIST%" || (
     exit /b 1
 )
 
-%PYTHON_CMD% -m pip install -e .
+%PYTHON_CMD% -m venv "%VENV_DIR%"
 if errorlevel 1 (
-    echo Failed to install project dependencies.
+    echo Failed to create local build virtual environment.
     popd
     exit /b 1
 )
 
-%PYTHON_CMD% -m pip install pyinstaller
-if errorlevel 1 (
-    echo Failed to install PyInstaller.
+if not exist "%BUILD_PYTHON%" (
+    echo Build virtual environment is missing Python:
+    echo %BUILD_PYTHON%
     popd
     exit /b 1
 )
 
-%PYTHON_CMD% -m PyInstaller --clean --noconfirm --workpath "%BUILD_WORK%" --distpath "%BUILD_DIST%" "KmoeMangaDownloader-windows.spec"
+"%BUILD_PYTHON%" -m pip install "aiofiles~=24.1.0" "aiohttp~=3.12.15" "beautifulsoup4~=4.13.4" "rich~=13.9.4" "typing-extensions~=4.15.0" "yarl~=1.20.1" "pyinstaller"
+if errorlevel 1 (
+    echo Failed to install build dependencies.
+    popd
+    exit /b 1
+)
+
+set "SOURCE_PATH=%CD%\src"
+if defined PYTHONPATH set "PYTHONPATH=%SOURCE_PATH%;%PYTHONPATH%"
+if not defined PYTHONPATH set "PYTHONPATH=%SOURCE_PATH%"
+set "PYTHONNOUSERSITE=1"
+
+"%BUILD_PYTHON%" -m PyInstaller --clean --noconfirm --workpath "%BUILD_WORK%" --distpath "%BUILD_DIST%" "KmoeMangaDownloader-windows.spec"
 if errorlevel 1 (
     echo Windows package build failed.
     popd
