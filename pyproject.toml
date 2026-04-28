@@ -18,6 +18,7 @@ repository = "https://github.com/chrisis58/kmoe-manga-downloader"
 
 [tool.poetry.scripts]
 kmdr = "kmdr.main:entry_point"
+kmdr-gui = "kmdr.gui:entry_point"
 
 [tool.poetry.dependencies]
 python = ">=3.9"

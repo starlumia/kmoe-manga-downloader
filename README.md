@@ -50,6 +50,14 @@
 pip install kmoe-manga-downloader
 ```
 
+## 🖥️图形界面与 Windows 免安装包
+
+当前 fork 新增了 Tkinter 图形界面和 Windows 原生打包入口，可通过按钮和文本框完成登录、搜索、下载、配置等操作。
+
+- 使用指南：[docs/gui-usage.md](docs/gui-usage.md)
+- Windows 打包说明：[docs/windows-build.md](docs/windows-build.md)
+- Linux / WSL 启动说明：[docs/linux-wsl.md](docs/linux-wsl.md)
+
 ## 📋使用方法
 
 ### 1. 登录 `kmoe`

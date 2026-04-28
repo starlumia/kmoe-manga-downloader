@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Kmoe Manga Downloader
+Comment=Kmoe 漫画下载器图形界面
+Exec=sh -c 'cd "$(dirname "$1")" && . /home/starlumia/anaconda3/etc/profile.d/conda.sh && conda activate kmdr && PYTHONPATH="$PWD/src" KMDR_CLI_PYTHON="/home/starlumia/anaconda3/envs/kmdr/bin/python" LANG=C.UTF-8 LC_ALL=C.UTF-8 KMDR_GUI_FONT_FAMILY="Noto Sans SC" KMDR_GUI_FONT_SIZE=16 KMDR_GUI_SCALE=1.7 /usr/bin/python3 -m kmdr.gui' launcher %k
+Terminal=false
+Categories=Network;Utility;
