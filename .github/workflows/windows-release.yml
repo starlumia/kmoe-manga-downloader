@@ -1,0 +1,57 @@
+name: Windows Release Package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Write release version
+        shell: powershell
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          "__version__ = `"$version`"" | Set-Content -Encoding utf8 src\kmdr\_version.py
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiofiles~=24.1.0 aiohttp~=3.12.15 beautifulsoup4~=4.13.4 rich~=13.9.4 typing-extensions~=4.15.0 yarl~=1.20.1 pyinstaller
+
+      - name: Build Windows package
+        shell: cmd
+        run: |
+          set PYTHONPATH=%GITHUB_WORKSPACE%\src
+          set PYTHONNOUSERSITE=1
+          python -m PyInstaller --clean --noconfirm --workpath %GITHUB_WORKSPACE%\build --distpath %GITHUB_WORKSPACE%\dist KmoeMangaDownloader-windows.spec
+
+      - name: Zip release assets
+        shell: powershell
+        run: |
+          Compress-Archive -Path "dist\Kmoe Manga Downloader\*" -DestinationPath "Kmoe-Manga-Downloader-Windows.zip" -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            Kmoe-Manga-Downloader-Windows.zip
+            dist/Kmoe Manga Downloader/Kmoe Manga Downloader.exe
+            dist/Kmoe Manga Downloader/kmdr-cli.exe
