@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 import ntpath
 import os
@@ -121,6 +124,249 @@ def _parse_toolcall_line(line: str) -> Optional[dict]:
     return None
 
 
+def _format_volume_selection(indexes: Iterable[int]) -> str:
+    sorted_indexes = sorted(set(indexes))
+    if not sorted_indexes:
+        return "all"
+
+    ranges = []
+    start = prev = sorted_indexes[0]
+
+    for index in sorted_indexes[1:]:
+        if index == prev + 1:
+            prev = index
+            continue
+
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = index
+
+    ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def _gui_config_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".kmdr-gui")
+
+
+def _load_gui_config() -> dict[str, object]:
+    try:
+        with open(_gui_config_path(), encoding="utf-8") as file:
+            config = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return config if isinstance(config, dict) else {}
+
+
+def _save_gui_config(config: dict[str, object]) -> None:
+    with open(_gui_config_path(), "w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+
+
+def _gui_secret_key_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".kmdr-gui.key")
+
+
+def _load_or_create_gui_secret_key() -> bytes:
+    key_path = _gui_secret_key_path()
+    try:
+        with open(key_path, "rb") as file:
+            encoded_key = file.read().strip()
+        key = base64.urlsafe_b64decode(encoded_key)
+        if len(key) >= 32:
+            return key
+    except (OSError, ValueError):
+        pass
+
+    key = os.urandom(32)
+    with open(key_path, "wb") as file:
+        file.write(base64.urlsafe_b64encode(key))
+
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+
+    return key
+
+
+def _local_secret_key() -> bytes:
+    return hashlib.sha256(_load_or_create_gui_secret_key() + b"kmdr-gui-local-secret-v1").digest()
+
+
+def _xor_bytes(data: bytes, key: bytes, nonce: bytes) -> bytes:
+    output = bytearray()
+    counter = 0
+    while len(output) < len(data):
+        block = hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        output.extend(block)
+        counter += 1
+
+    return bytes(value ^ mask for value, mask in zip(data, output))
+
+
+def _protect_local_bytes(data: bytes) -> bytes:
+    key = _local_secret_key()
+    nonce = os.urandom(16)
+    ciphertext = _xor_bytes(data, key, nonce)
+    tag = hmac.new(key, b"kmdr-gui-auth-v1" + nonce + ciphertext, hashlib.sha256).digest()
+    return nonce + tag + ciphertext
+
+
+def _unprotect_local_bytes(data: bytes) -> bytes:
+    if len(data) < 48:
+        raise ValueError("本机密文数据不完整。")
+
+    key = _local_secret_key()
+    nonce = data[:16]
+    tag = data[16:48]
+    ciphertext = data[48:]
+    expected_tag = hmac.new(key, b"kmdr-gui-auth-v1" + nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise ValueError("本机密文校验失败。")
+
+    return _xor_bytes(ciphertext, key, nonce)
+
+
+def _protect_windows_bytes(data: bytes) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(DataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(DataBlob),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    buffer = ctypes.create_string_buffer(data)
+    in_blob = DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = DataBlob()
+    if not crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+        raise OSError(ctypes.get_last_error(), "Windows DPAPI 加密失败。")
+
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
+def _unprotect_windows_bytes(data: bytes) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    buffer = ctypes.create_string_buffer(data)
+    in_blob = DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = DataBlob()
+    if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+        raise OSError(ctypes.get_last_error(), "Windows DPAPI 解密失败。")
+
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
+def _login_secret_scheme() -> str:
+    return "win-dpapi-v1" if os.name == "nt" else "local-key-v1"
+
+
+def _encrypt_login_secret(username: str, password: str) -> dict[str, str]:
+    payload = json.dumps({"username": username, "password": password}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    scheme = _login_secret_scheme()
+    if scheme == "win-dpapi-v1":
+        protected = _protect_windows_bytes(payload)
+    else:
+        protected = _protect_local_bytes(payload)
+
+    return {"scheme": scheme, "payload": base64.b64encode(protected).decode("ascii")}
+
+
+def _decrypt_login_secret(secret: object) -> Optional[tuple[str, str]]:
+    if not isinstance(secret, dict):
+        return None
+
+    scheme = secret.get("scheme")
+    payload = secret.get("payload")
+    if not isinstance(scheme, str) or not isinstance(payload, str):
+        return None
+
+    try:
+        protected = base64.b64decode(payload.encode("ascii"), validate=True)
+        if scheme == "win-dpapi-v1" and os.name == "nt":
+            decrypted = _unprotect_windows_bytes(protected)
+        elif scheme == "local-key-v1":
+            decrypted = _unprotect_local_bytes(protected)
+        else:
+            return None
+        data = json.loads(decrypted.decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    username = data.get("username")
+    password = data.get("password")
+    if isinstance(username, str) and isinstance(password, str):
+        return username, password
+    return None
+
+
+def _saved_login_from_config(config: dict[str, object]) -> Optional[tuple[str, str]]:
+    saved_login = _decrypt_login_secret(config.get("login_secret"))
+    if saved_login is not None:
+        return saved_login
+
+    username = config.get("login_username")
+    password = config.get("login_password")
+    if isinstance(username, str) and isinstance(password, str):
+        return username, password
+    return None
+
+
+def _has_legacy_plain_login(config: dict[str, object]) -> bool:
+    return isinstance(config.get("login_username"), str) or isinstance(config.get("login_password"), str)
+
+
+def _config_with_encrypted_login(config: dict[str, object], username: str, password: str) -> dict[str, object]:
+    updated = dict(config)
+    updated["remember_login"] = True
+    updated["login_secret"] = _encrypt_login_secret(username, password)
+    updated.pop("login_username", None)
+    updated.pop("login_password", None)
+    return updated
+
+
 @dataclass(frozen=True)
 class DownloadOptions:
     book_url: str
@@ -238,6 +484,11 @@ class KmdrDesktopApp:
         self._worker: Optional[threading.Thread] = None
         self._result_handler: Optional[Callable[[dict], None]] = None
         self._search_results: list[dict] = []
+        self._parsed_volumes: list[dict] = []
+        self._gui_config = _load_gui_config()
+        self._active_scroll_canvas = None
+        self._scroll_canvases = []
+        self._wheel_priority_widgets = []
         self._style = None
 
         self._configure_root()
@@ -246,8 +497,8 @@ class KmdrDesktopApp:
 
     def _configure_root(self) -> None:
         self._root.title("Kmoe Manga Downloader")
-        self._root.geometry("1320x940")
-        self._root.minsize(1120, 820)
+        self._root.geometry("1180x820")
+        self._root.minsize(900, 620)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._root.columnconfigure(0, weight=1)
@@ -333,6 +584,13 @@ class KmdrDesktopApp:
         self._build_account_tab()
         self._build_config_tab()
 
+        self._root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self._root.bind_all("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
+        self._root.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        self._root.bind_all("<Button-5>", self._on_mousewheel, add="+")
+        self._root.bind_all("<Shift-Button-4>", self._on_shift_mousewheel, add="+")
+        self._root.bind_all("<Shift-Button-5>", self._on_shift_mousewheel, add="+")
+
         controls = ttk.Frame(main)
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 8))
         controls.columnconfigure(0, weight=1)
@@ -368,19 +626,20 @@ class KmdrDesktopApp:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
-        self._log_text = self._tk.Text(log_frame, height=13, wrap="word", state="disabled", font=self._fixed_font)
+        self._log_text = self._tk.Text(log_frame, height=8, wrap="word", state="disabled", font=self._fixed_font)
         self._log_text.grid(row=0, column=0, sticky="nsew")
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self._log_text.yview)
         log_scroll.grid(row=0, column=1, sticky="ns")
         self._log_text.configure(yscrollcommand=log_scroll.set)
+        self._migrate_legacy_login_secret()
 
     def _build_download_tab(self) -> None:
         ttk = self._ttk
-        frame = ttk.Frame(self._notebook, padding=12)
-        self._notebook.add(frame, text="下载")
+        frame = self._add_scrollable_tab("下载")
 
         for idx in range(4):
             frame.columnconfigure(idx, weight=1)
+        frame.rowconfigure(16, weight=1)
 
         header = ttk.Frame(frame)
         header.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 12))
@@ -448,6 +707,149 @@ class KmdrDesktopApp:
         self._download_progress = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
         self._download_progress.grid(row=0, column=0, sticky="ew")
 
+        volume_frame = ttk.LabelFrame(frame, text="已解析卷列表", padding=8)
+        volume_frame.grid(row=16, column=0, columnspan=4, sticky="nsew", pady=(14, 0))
+        volume_frame.columnconfigure(0, weight=1)
+        volume_frame.rowconfigure(1, weight=1)
+
+        volume_actions = ttk.Frame(volume_frame)
+        volume_actions.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        volume_actions.columnconfigure(4, weight=1)
+        ttk.Button(volume_actions, text="解析卷列表", command=self._parse_download_volumes).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(volume_actions, text="应用选中卷", command=self._apply_selected_volumes).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(volume_actions, text="全选", command=self._select_all_parsed_volumes).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(volume_actions, text="清空选择", command=self._clear_volume_selection).grid(row=0, column=3, padx=(0, 8))
+
+        self._volume_tree = ttk.Treeview(
+            volume_frame,
+            columns=("index", "type", "name", "pages", "size", "extra"),
+            show="headings",
+            selectmode="extended",
+            height=12,
+        )
+        self._volume_tree.heading("index", text="卷号")
+        self._volume_tree.heading("type", text="类型")
+        self._volume_tree.heading("name", text="卷名")
+        self._volume_tree.heading("pages", text="页数")
+        self._volume_tree.heading("size", text="大小 MB")
+        self._volume_tree.heading("extra", text="状态")
+        self._volume_tree.column("index", width=80, anchor="center")
+        self._volume_tree.column("type", width=110, anchor="center")
+        self._volume_tree.column("name", width=360, anchor="w")
+        self._volume_tree.column("pages", width=80, anchor="e")
+        self._volume_tree.column("size", width=90, anchor="e")
+        self._volume_tree.column("extra", width=150, anchor="w")
+        self._volume_tree.grid(row=1, column=0, sticky="nsew")
+
+        volume_scroll = ttk.Scrollbar(volume_frame, orient="vertical", command=self._volume_tree.yview)
+        volume_scroll.grid(row=1, column=1, sticky="ns")
+        self._volume_tree.configure(yscrollcommand=volume_scroll.set)
+        self._wheel_priority_widgets.append(self._volume_tree)
+
+    def _add_scrollable_tab(self, title: str):
+        ttk = self._ttk
+        outer = ttk.Frame(self._notebook)
+        self._notebook.add(outer, text=title)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+
+        canvas = self._tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        vertical_scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        horizontal_scroll = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+
+        frame = ttk.Frame(canvas, padding=12)
+        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def update_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            width = max(canvas.winfo_width(), frame.winfo_reqwidth())
+            canvas.itemconfigure(window_id, width=width)
+
+        frame.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Enter>", lambda _event: self._activate_scroll_canvas(canvas))
+        frame.bind("<Enter>", lambda _event: self._activate_scroll_canvas(canvas))
+        canvas.bind("<Leave>", lambda _event: self._deactivate_scroll_canvas_when_outside(canvas))
+        frame.bind("<Leave>", lambda _event: self._deactivate_scroll_canvas_when_outside(canvas))
+
+        self._scroll_canvases.append((canvas, frame, window_id))
+        return frame
+
+    def _activate_scroll_canvas(self, canvas) -> None:
+        self._active_scroll_canvas = canvas
+
+    def _deactivate_scroll_canvas_when_outside(self, canvas) -> None:
+        if self._active_scroll_canvas is canvas:
+            self._active_scroll_canvas = None
+
+    def _find_scroll_canvas(self, widget):
+        for canvas, frame, _window_id in self._scroll_canvases:
+            if widget is canvas or self._is_descendant(widget, frame):
+                return canvas
+        return self._active_scroll_canvas
+
+    def _find_priority_scroll_widget(self, widget):
+        for priority_widget in self._wheel_priority_widgets:
+            if widget is priority_widget or self._is_descendant(widget, priority_widget):
+                return priority_widget
+        return None
+
+    def _is_descendant(self, widget, parent) -> bool:
+        while widget is not None:
+            if widget is parent:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _wheel_units(self, event) -> int:
+        if getattr(event, "num", None) == 4:
+            return -3
+        if getattr(event, "num", None) == 5:
+            return 3
+
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return 0
+
+        steps = abs(delta) // 120
+        if steps < 1:
+            steps = 1
+        return -steps if delta > 0 else steps
+
+    def _on_mousewheel(self, event):
+        units = self._wheel_units(event)
+        if units == 0:
+            return None
+
+        priority_widget = self._find_priority_scroll_widget(event.widget)
+        if priority_widget is not None:
+            priority_widget.yview_scroll(units, "units")
+            return "break"
+
+        canvas = self._find_scroll_canvas(event.widget)
+        if canvas is not None:
+            canvas.yview_scroll(units, "units")
+            return "break"
+
+        return None
+
+    def _on_shift_mousewheel(self, event):
+        units = self._wheel_units(event)
+        if units == 0:
+            return None
+
+        canvas = self._find_scroll_canvas(event.widget)
+        if canvas is not None:
+            canvas.xview_scroll(units, "units")
+            return "break"
+
+        return None
+
     def _build_search_tab(self) -> None:
         ttk = self._ttk
         frame = ttk.Frame(self._notebook, padding=12)
@@ -493,8 +895,14 @@ class KmdrDesktopApp:
         for idx in range(2):
             frame.columnconfigure(idx, weight=1)
 
-        self._login_username = self._tk.StringVar()
-        self._login_password = self._tk.StringVar()
+        saved_login = _saved_login_from_config(self._gui_config) if self._gui_config.get("remember_login") else None
+        remember_login = saved_login is not None
+        saved_username = saved_login[0] if saved_login else ""
+        saved_password = saved_login[1] if saved_login else ""
+
+        self._login_username = self._tk.StringVar(value=saved_username)
+        self._login_password = self._tk.StringVar(value=saved_password)
+        self._remember_login = self._tk.BooleanVar(value=remember_login)
         self._status_proxy = self._tk.StringVar()
 
         self._add_labeled_entry(frame, "用户名", self._login_username, 0, 0)
@@ -502,16 +910,28 @@ class KmdrDesktopApp:
         ttk.Label(frame, text="密码").grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Entry(frame, textvariable=self._login_password, show="*").grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
 
-        self._add_labeled_entry(frame, "状态检查代理", self._status_proxy, 2, 0, columnspan=2)
+        ttk.Checkbutton(
+            frame,
+            text="记住账号密码（加密保存）",
+            variable=self._remember_login,
+            command=self._on_remember_login_changed,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 4))
+
+        self._add_labeled_entry(frame, "状态检查代理", self._status_proxy, 3, 0, columnspan=2)
 
         actions = ttk.Frame(frame)
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(actions, text="登录并保存 Cookie", command=self._start_login).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(actions, text="查看账户状态", command=self._start_status).grid(row=0, column=1)
+        ttk.Button(actions, text="清除已保存账号", command=lambda: self._forget_saved_login(show_message=True, clear_fields=True)).grid(
+            row=0,
+            column=2,
+            padx=(8, 0),
+        )
 
         self._account_text = self._tk.Text(frame, height=12, wrap="word", state="disabled", font=self._fixed_font)
-        self._account_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
-        frame.rowconfigure(5, weight=1)
+        self._account_text.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        frame.rowconfigure(6, weight=1)
 
     def _build_config_tab(self) -> None:
         ttk = self._ttk
@@ -580,6 +1000,65 @@ class KmdrDesktopApp:
         self._account_text.configure(font=self._fixed_font)
         self._config_text.configure(font=self._fixed_font)
 
+    def _on_remember_login_changed(self) -> None:
+        if not self._remember_login.get():
+            self._forget_saved_login()
+
+    def _migrate_legacy_login_secret(self) -> None:
+        if not self._gui_config.get("remember_login") or not _has_legacy_plain_login(self._gui_config):
+            return
+
+        username = self._login_username.get()
+        password = self._login_password.get()
+        if not username or not password:
+            return
+
+        try:
+            config = _config_with_encrypted_login(self._gui_config, username, password)
+            _save_gui_config(config)
+        except (OSError, ValueError) as exc:
+            self._append_log(f"[GUI] 迁移已保存账号到密文失败：{exc}")
+            return
+
+        self._gui_config = config
+        self._append_log("[GUI] 已将旧版明文账号配置迁移为密文。")
+
+    def _persist_login_preference(self, username: str, password: str) -> None:
+        if not self._remember_login.get():
+            self._forget_saved_login()
+            return
+
+        try:
+            config = _config_with_encrypted_login(self._gui_config, username, password)
+            _save_gui_config(config)
+        except (OSError, ValueError) as exc:
+            self._append_log(f"[GUI] 保存账号密码失败：{exc}")
+            return
+
+        self._gui_config = config
+        self._append_log("[GUI] 已将账号密码加密保存到本机 GUI 配置。")
+
+    def _forget_saved_login(self, show_message: bool = False, clear_fields: bool = False) -> None:
+        config = dict(self._gui_config)
+        config["remember_login"] = False
+        config.pop("login_secret", None)
+        config.pop("login_username", None)
+        config.pop("login_password", None)
+
+        try:
+            _save_gui_config(config)
+        except OSError as exc:
+            self._append_log(f"[GUI] 清除已保存账号失败：{exc}")
+            return
+
+        self._gui_config = config
+        self._remember_login.set(False)
+        if clear_fields:
+            self._login_username.set("")
+            self._login_password.set("")
+        if show_message:
+            self._messagebox.showinfo("已清除", "已清除本机保存的账号密码。")
+
     def _choose_download_dest(self) -> None:
         selected = self._filedialog.askdirectory(initialdir=self._download_dest.get() or os.getcwd())
         if selected:
@@ -597,11 +1076,12 @@ class KmdrDesktopApp:
             self._messagebox.showwarning("缺少登录信息", "请填写用户名和密码。")
             return
 
-        self._start_command(
-            "登录",
-            self._builder.login(username=username, password=password),
-            self._render_account_result,
-        )
+        def handle_login_result(payload: dict) -> None:
+            self._render_account_result(payload)
+            if payload.get("code") == 0:
+                self._persist_login_preference(username, password)
+
+        self._start_command("登录", self._builder.login(username=username, password=password), handle_login_result)
 
     def _start_status(self) -> None:
         self._start_command("账户状态", self._builder.status(proxy=self._status_proxy.get()), self._render_account_result)
@@ -631,6 +1111,7 @@ class KmdrDesktopApp:
 
         self._download_book_url.set(values[3])
         self._notebook.select(0)
+        self._parse_download_volumes()
 
     def _start_download(self) -> None:
         options = self._collect_download_options(explain=False)
@@ -648,7 +1129,42 @@ class KmdrDesktopApp:
         self._download_progress["value"] = 0
         self._start_command("预估下载计划", self._builder.download(options), self._render_download_result)
 
+    def _parse_download_volumes(self) -> None:
+        book_url = self._download_book_url.get().strip()
+        if not book_url:
+            self._messagebox.showwarning("缺少漫画链接", "请先选择或填写漫画详情 URL。")
+            return
+
+        options = DownloadOptions(
+            book_url=book_url,
+            dest=self._download_dest.get(),
+            volume="all",
+            vol_type="all",
+            book_format=self._download_format.get(),
+            method=self._download_method.get(),
+            proxy=self._download_proxy.get(),
+            retry=self._download_retry.get(),
+            callback="",
+            num_workers=self._download_workers.get(),
+            max_size="",
+            limit="",
+            per_cred_ratio=self._download_per_cred_ratio.get(),
+            vip=self._download_vip.get(),
+            disable_multi_part=self._download_disable_multi_part.get(),
+            try_multi_part=self._download_try_multi_part.get(),
+            fake_ua=self._download_fake_ua.get(),
+            use_pool=self._download_use_pool.get(),
+            explain=True,
+        )
+
+        self._download_progress["value"] = 0
+        self._clear_parsed_volumes()
+        self._start_command("解析卷列表", self._builder.download(options), self._render_volume_parse_result)
+
     def _collect_download_options(self, explain: bool) -> Optional[DownloadOptions]:
+        if self._selected_parsed_volumes() and not self._apply_selected_volumes(show_message=False):
+            return None
+
         book_url = self._download_book_url.get().strip()
         volume = self._download_volume.get().strip()
         if not book_url:
@@ -679,6 +1195,84 @@ class KmdrDesktopApp:
             use_pool=self._download_use_pool.get(),
             explain=explain,
         )
+
+    def _clear_parsed_volumes(self) -> None:
+        self._parsed_volumes = []
+        self._volume_tree.delete(*self._volume_tree.get_children())
+
+    def _render_parsed_volumes(self, volumes: list[dict]) -> None:
+        self._volume_tree.delete(*self._volume_tree.get_children())
+
+        for idx, volume in enumerate(volumes):
+            size = volume.get("size")
+            if isinstance(size, (int, float)):
+                size_text = f"{size:.2f}"
+            else:
+                size_text = ""
+
+            self._volume_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    volume.get("index", ""),
+                    volume.get("type_label") or volume.get("type", ""),
+                    volume.get("name", ""),
+                    volume.get("pages", ""),
+                    size_text,
+                    volume.get("extra_info", ""),
+                ),
+            )
+
+    def _selected_parsed_volumes(self) -> list[dict]:
+        selected = []
+        for item_id in self._volume_tree.selection():
+            try:
+                selected.append(self._parsed_volumes[int(item_id)])
+            except (ValueError, IndexError):
+                continue
+        return selected
+
+    def _apply_selected_volumes(self, show_message: bool = True) -> bool:
+        selected = self._selected_parsed_volumes()
+        if not selected:
+            if show_message:
+                self._messagebox.showinfo("未选择卷", "请先在已解析卷列表中选择一个或多个卷。")
+            return True
+
+        selected_keys = {(volume.get("type"), volume.get("index")) for volume in selected}
+        selected_indexes = {volume.get("index") for volume in selected if isinstance(volume.get("index"), int)}
+        selected_types = {volume.get("type") for volume in selected if volume.get("type")}
+
+        if not selected_indexes or not selected_types:
+            if show_message:
+                self._messagebox.showwarning("卷信息异常", "选中的卷缺少卷号或类型，无法生成下载参数。")
+            return False
+
+        if len(selected_types) == 1:
+            vol_type = next(iter(selected_types))
+        else:
+            implied_keys = {(volume.get("type"), volume.get("index")) for volume in self._parsed_volumes if volume.get("index") in selected_indexes}
+            if implied_keys != selected_keys:
+                if show_message:
+                    self._messagebox.showwarning("暂不支持混合选择", "混合选择会包含未选中的同卷号条目。请一次选择同一卷类型。")
+                return False
+            vol_type = "all"
+
+        self._download_vol_type.set(vol_type)
+        self._download_volume.set(_format_volume_selection(index for index in selected_indexes if isinstance(index, int)))
+
+        if show_message:
+            self._status_var.set(f"已应用 {len(selected)} 个卷到下载参数")
+        return True
+
+    def _select_all_parsed_volumes(self) -> None:
+        children = self._volume_tree.get_children()
+        if children:
+            self._volume_tree.selection_set(children)
+
+    def _clear_volume_selection(self) -> None:
+        self._volume_tree.selection_remove(self._volume_tree.selection())
 
     def _set_base_url(self) -> None:
         base_url = self._config_base_url.get().strip()
@@ -824,6 +1418,19 @@ class KmdrDesktopApp:
             )
 
         self._status_var.set(f"搜索完成，共 {len(books)} 条结果")
+
+    def _render_volume_parse_result(self, payload: dict) -> None:
+        self._render_json_to_log(payload)
+
+        if payload.get("code") != 0:
+            self._status_var.set(f"解析卷列表失败: {payload.get('msg', '未知错误')}")
+            return
+
+        data = payload.get("data") or {}
+        volumes = data.get("volumes") or data.get("to_download") or []
+        self._parsed_volumes = volumes
+        self._render_parsed_volumes(volumes)
+        self._status_var.set(f"卷列表解析完成，共 {len(volumes)} 卷")
 
     def _render_download_result(self, payload: dict) -> None:
         self._render_json_to_log(payload)
