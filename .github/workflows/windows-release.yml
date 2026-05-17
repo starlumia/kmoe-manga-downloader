@@ -34,17 +34,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install aiofiles~=24.1.0 aiohttp~=3.12.15 beautifulsoup4~=4.13.4 rich~=13.9.4 typing-extensions~=4.15.0 yarl~=1.20.1 pyinstaller
 
-      - name: Build Windows package
+      - name: Build Windows packages
         shell: cmd
         run: |
           set PYTHONPATH=%GITHUB_WORKSPACE%\src
           set PYTHONNOUSERSITE=1
-          python -m PyInstaller --clean --noconfirm --workpath %GITHUB_WORKSPACE%\build --distpath %GITHUB_WORKSPACE%\dist KmoeMangaDownloader-windows.spec
+          python -m PyInstaller --clean --noconfirm --workpath %GITHUB_WORKSPACE%\build\onedir --distpath %GITHUB_WORKSPACE%\dist KmoeMangaDownloader-windows.spec
+          python -m PyInstaller --clean --noconfirm --workpath %GITHUB_WORKSPACE%\build\onefile --distpath %GITHUB_WORKSPACE%\dist-onefile KmoeMangaDownloader-windows-onefile.spec
 
       - name: Zip release assets
         shell: powershell
         run: |
           Compress-Archive -Path "dist\Kmoe Manga Downloader\*" -DestinationPath "Kmoe-Manga-Downloader-Windows.zip" -Force
+          Copy-Item "dist-onefile\Kmoe Manga Downloader.exe" "Kmoe-Manga-Downloader.exe" -Force
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -52,6 +54,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           files: |
+            Kmoe-Manga-Downloader.exe
             Kmoe-Manga-Downloader-Windows.zip
-            dist/Kmoe Manga Downloader/Kmoe Manga Downloader.exe
             dist/Kmoe Manga Downloader/kmdr-cli.exe

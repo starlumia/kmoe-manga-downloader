@@ -116,14 +116,35 @@ class TestKmdrGuiCommandBuilder(unittest.TestCase):
             [r"C:\app\kmdr-cli.exe", "--mode", "toolcall", "version"],
         )
 
-    @patch("kmdr.gui.os.path.exists", return_value=True)
+    @patch("kmdr.gui.os.path.exists", return_value=False)
     @patch("kmdr.gui.os.name", "nt")
+    @patch("kmdr.gui.sys._MEIPASS", r"C:\Temp\_MEI123", create=True)
     @patch("kmdr.gui.sys.executable", r"C:\app\Kmoe Manga Downloader.exe")
     @patch("kmdr.gui.sys.frozen", True, create=True)
     def test_bundled_cli_executable(self, _exists):
         self.assertEqual(
             _bundled_cli_executable(),
+            r"C:\app\Kmoe Manga Downloader.exe",
+        )
+
+    @patch("kmdr.gui.os.path.exists", return_value=True)
+    @patch("kmdr.gui.os.name", "nt")
+    @patch("kmdr.gui.sys._MEIPASS", None, create=True)
+    @patch("kmdr.gui.sys.executable", r"C:\app\Kmoe Manga Downloader.exe")
+    @patch("kmdr.gui.sys.frozen", True, create=True)
+    def test_bundled_cli_executable_prefers_sidecar_for_onedir(self, _exists):
+        self.assertEqual(
+            _bundled_cli_executable(),
             r"C:\app\kmdr-cli.exe",
+        )
+
+    @patch("kmdr.gui.sys.frozen", True, create=True)
+    def test_frozen_gui_command_runs_internal_cli(self):
+        builder = KmdrCommandBuilder(python_executable=r"C:\app\Kmoe Manga Downloader.exe")
+
+        self.assertEqual(
+            builder.version(),
+            [r"C:\app\Kmoe Manga Downloader.exe", "--kmdr-cli", "--mode", "toolcall", "version"],
         )
 
     @patch("kmdr.gui.os.name", "posix")

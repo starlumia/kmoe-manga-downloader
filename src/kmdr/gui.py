@@ -65,6 +65,9 @@ def _bundled_cli_executable() -> Optional[str]:
     if os.path.exists(candidate):
         return candidate
 
+    if getattr(sys, "_MEIPASS", None):
+        return sys.executable
+
     return None
 
 
@@ -448,6 +451,8 @@ class KmdrCommandBuilder:
 
     def _base(self) -> list[str]:
         executable_name = ntpath.basename(self._python_executable) if "\\" in self._python_executable else os.path.basename(self._python_executable)
+        if getattr(sys, "frozen", False) and executable_name.lower() in {"kmoe manga downloader.exe", "kmoe.manga.downloader.exe"}:
+            return [self._python_executable, "--kmdr-cli", "--mode", "toolcall"]
         if executable_name.lower() in {"kmdr-cli.exe", "kmdr-cli"}:
             return [self._python_executable, "--mode", "toolcall"]
         return [self._python_executable, "-m", self._module, "--mode", "toolcall"]
