@@ -6,8 +6,10 @@ KMDR 用于管理控制台输出的模块。
 
 import io
 import sys
+from collections.abc import Callable
+from contextlib import contextmanager
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.traceback import Traceback
@@ -37,6 +39,8 @@ class OutputMode(str, Enum):
 
 
 _current_mode: OutputMode = OutputMode.INTERACTIVE
+_atexit_registered = False
+_toolcall_output_handler: Optional[Callable[[str], None]] = None
 
 
 def in_toolcall_mode() -> bool:
@@ -47,14 +51,18 @@ def in_toolcall_mode() -> bool:
 
 
 def _set_output_mode(mode: OutputMode):
-    global _current_mode
+    global _atexit_registered, _current_mode
     _current_mode = mode
     if in_toolcall_mode():
         _console.quiet = True
 
-        import atexit
+        if not _atexit_registered:
+            import atexit
 
-        atexit.register(_flush_emit)
+            atexit.register(_flush_emit)
+            _atexit_registered = True
+    else:
+        _console.quiet = False
 
 
 def _update_verbose_setting(value: bool):
@@ -123,6 +131,45 @@ def log(*args, debug=False, **kwargs):
 _emit_payload = None
 
 
+@contextmanager
+def toolcall_output_handler(handler: Callable[[str], None]):
+    """
+    临时接管 toolcall JSON 行输出。
+
+    GUI 进程内调用核心命令时不会退出当前进程，不能再依赖 stdout 和 atexit。
+    这里允许 GUI 直接接收 emit_progress() 和 flush_emit() 生成的 JSON 行。
+    """
+    global _toolcall_output_handler
+    previous = _toolcall_output_handler
+    _toolcall_output_handler = handler
+    try:
+        yield
+    finally:
+        _toolcall_output_handler = previous
+
+
+def reset_emit() -> None:
+    global _emit_payload
+    _emit_payload = None
+
+
+def flush_emit() -> None:
+    _flush_emit()
+
+
+def _write_toolcall_line(output_str: str) -> None:
+    if _toolcall_output_handler is not None:
+        _toolcall_output_handler(output_str)
+        return
+
+    was_quiet = _console.quiet
+    _console.quiet = False
+    try:
+        _console.print(output_str, markup=False, highlight=False, soft_wrap=True)
+    finally:
+        _console.quiet = was_quiet
+
+
 def emit(*args, **kwargs):
     """
     专门用于在工具调用模式下，向下游暂存最终的规整数据。
@@ -157,42 +204,33 @@ def emit_progress(**kwargs):
 
     payload = {"type": "progress", **kwargs}
     output_str = json.dumps(payload, cls=SafeJSONEncoder, ensure_ascii=False)
-
-    was_quiet = _console.quiet
-    _console.quiet = False
-    try:
-        _console.print(output_str, markup=False, highlight=False, soft_wrap=True)
-    finally:
-        _console.quiet = was_quiet
+    _write_toolcall_line(output_str)
 
 
 def _flush_emit():
+    global _emit_payload
     if _emit_payload is not None:
-        was_quiet = _console.quiet
-        _console.quiet = False
-        try:
-            args, kwargs = _emit_payload
+        args, kwargs = _emit_payload
+        _emit_payload = None
 
-            import json
+        import json
 
-            from .encoder import SafeJSONEncoder
+        from .encoder import SafeJSONEncoder
 
-            payload = kwargs if kwargs else args[0]
-            response = {"type": "result"}
+        payload = kwargs if kwargs else args[0]
+        response = {"type": "result"}
 
-            if isinstance(payload, Exception):
-                response["code"] = getattr(payload, "code", 50)
-                response["msg"] = str(payload) or payload.__class__.__name__
-                response["data"] = None
-            else:
-                response["code"] = 0
-                response["msg"] = "success"
-                response["data"] = payload
+        if isinstance(payload, Exception):
+            response["code"] = getattr(payload, "code", 50)
+            response["msg"] = str(payload) or payload.__class__.__name__
+            response["data"] = None
+        else:
+            response["code"] = 0
+            response["msg"] = "success"
+            response["data"] = payload
 
-            output_str = json.dumps(response, cls=SafeJSONEncoder, ensure_ascii=False, indent=None)
-            _console.print(output_str, markup=False, highlight=False, soft_wrap=True)
-        finally:
-            _console.quiet = was_quiet
+        output_str = json.dumps(response, cls=SafeJSONEncoder, ensure_ascii=False, indent=None)
+        _write_toolcall_line(output_str)
 
 
 def exception(exception: Exception):

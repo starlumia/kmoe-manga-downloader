@@ -1,5 +1,6 @@
 from kmdr.core import CONFIGURER, Configurer
 from kmdr.core.console import emit, info
+from kmdr.core.defaults import base_url_var
 
 
 @CONFIGURER.register()
@@ -11,6 +12,7 @@ class BaseUrlUpdator(Configurer):
     def _operate(self) -> None:
         try:
             self._configurer.set_base_url(self._base_url)
+            base_url_var.set(self._base_url)
         except KeyError as e:
             info(f"[red]{e.args[0]}[/red]")
             return

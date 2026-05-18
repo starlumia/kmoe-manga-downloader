@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 from kmdr.gui import (
     DownloadOptions,
+    InlineKmdrCommandRunner,
     KmdrCommandBuilder,
     _bundled_cli_executable,
+    _command_mode,
     _config_with_encrypted_login,
     _format_volume_selection,
     _gui_config_path,
@@ -146,6 +148,44 @@ class TestKmdrGuiCommandBuilder(unittest.TestCase):
             builder.version(),
             [r"C:\app\Kmoe Manga Downloader.exe", "--kmdr-cli", "--mode", "toolcall", "version"],
         )
+
+    def test_inline_runner_extracts_kmdr_args_from_module_command(self):
+        self.assertEqual(
+            InlineKmdrCommandRunner._extract_kmdr_args(["python", "-m", "kmdr.main", "--mode", "toolcall", "version"]),
+            ["--mode", "toolcall", "version"],
+        )
+
+    def test_inline_runner_extracts_kmdr_args_from_onefile_command(self):
+        self.assertEqual(
+            InlineKmdrCommandRunner._extract_kmdr_args([r"C:\app\Kmoe Manga Downloader.exe", "--kmdr-cli", "--mode", "toolcall", "version"]),
+            ["--mode", "toolcall", "version"],
+        )
+
+    def test_inline_runner_extracts_kmdr_args_from_cli_command(self):
+        self.assertEqual(
+            InlineKmdrCommandRunner._extract_kmdr_args([r"C:\app\kmdr-cli.exe", "--mode", "toolcall", "version"]),
+            ["--mode", "toolcall", "version"],
+        )
+
+    def test_inline_runner_executes_version_without_subprocess(self):
+        lines = []
+        returncode = InlineKmdrCommandRunner(lines.append).run(["python", "-m", "kmdr.main", "--mode", "toolcall", "version"])
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(len(lines), 1)
+        payload = _parse_toolcall_line(lines[0])
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["type"], "result")
+        self.assertEqual(payload["code"], 0)
+        self.assertIn("version", payload["data"])
+
+    def test_command_mode_defaults_to_inline(self):
+        with patch.dict("kmdr.gui.os.environ", {}, clear=True):
+            self.assertEqual(_command_mode(), "inline")
+
+    def test_command_mode_can_fallback_to_subprocess(self):
+        with patch.dict("kmdr.gui.os.environ", {"KMDR_GUI_COMMAND_MODE": "subprocess"}):
+            self.assertEqual(_command_mode(), "subprocess")
 
     @patch("kmdr.gui.os.name", "posix")
     def test_subprocess_creation_flags_posix(self):

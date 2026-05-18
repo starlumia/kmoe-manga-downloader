@@ -11,6 +11,11 @@ async def main(args: Namespace, fallback: Callable[[], None] = lambda: print("NO
 
     post_init(args)
 
+    if args.command == "version":
+        info(f"[green]{__version__}[/green]")
+        emit(version=__version__)
+        return
+
     with _console.status("初始化中..."):
         import kmdr.module  # noqa: F401
         from kmdr.core.bases import (
@@ -27,11 +32,7 @@ async def main(args: Namespace, fallback: Callable[[], None] = lambda: print("NO
     debug("[bold green]以调试模式启动[/bold green]")
     debug("接收到的参数:", args)
 
-    if args.command == "version":
-        info(f"[green]{__version__}[/green]")
-        emit(version=__version__)
-
-    elif args.command == "config":
+    if args.command == "config":
         CONFIGURER.get(args).operate()
 
     elif args.command == "login":

@@ -1,3 +1,5 @@
+import argparse
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -125,6 +127,13 @@ def _parse_toolcall_line(line: str) -> Optional[dict]:
     if isinstance(payload, dict) and payload.get("type") in {"progress", "result"}:
         return payload
     return None
+
+
+def _command_mode() -> str:
+    configured = os.environ.get("KMDR_GUI_COMMAND_MODE", "inline").strip().lower()
+    if configured in {"subprocess", "process", "cli"}:
+        return "subprocess"
+    return "inline"
 
 
 def _format_volume_selection(indexes: Iterable[int]) -> str:
@@ -472,6 +481,117 @@ class KmdrCommandBuilder:
             args.append(flag)
 
 
+class InlineKmdrCommandRunner:
+    def __init__(self, emit_line: Callable[[str], None]):
+        self._emit_line = emit_line
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._task: Optional[asyncio.Task] = None
+
+    def run(self, args: list[str]) -> int:
+        command_args = self._extract_kmdr_args(args)
+        self._loop = asyncio.new_event_loop()
+
+        try:
+            asyncio.set_event_loop(self._loop)
+            self._task = self._loop.create_task(self._run_main(command_args))
+            return self._loop.run_until_complete(self._task)
+        finally:
+            try:
+                self._cancel_pending_tasks(self._loop)
+            finally:
+                asyncio.set_event_loop(None)
+                self._loop.close()
+                self._loop = None
+                self._task = None
+
+    def terminate(self) -> None:
+        if self._loop is None or self._task is None or self._task.done():
+            return
+
+        self._loop.call_soon_threadsafe(self._task.cancel)
+
+    async def _run_main(self, command_args: list[str]) -> int:
+        from kmdr.core.console import flush_emit, reset_emit, toolcall_output_handler
+        from kmdr.core.defaults import Configurer, base_url_var
+        from kmdr.core.error import KmdrError
+        from kmdr.main import main
+
+        reset_emit()
+        base_url_var.set(Configurer().base_url)
+
+        try:
+            with toolcall_output_handler(self._emit_line):
+                namespace = self._parse_args(command_args)
+                await main(namespace)
+                flush_emit()
+            return 0
+        except asyncio.CancelledError:
+            with toolcall_output_handler(self._emit_line):
+                from kmdr.core.console import emit
+
+                emit("操作已取消")
+                flush_emit()
+            return 130
+        except KmdrError as exc:
+            with toolcall_output_handler(self._emit_line):
+                from kmdr.core.console import emit
+
+                emit(exc)
+                flush_emit()
+            return getattr(exc, "code", 50)
+        except SystemExit as exc:
+            with toolcall_output_handler(self._emit_line):
+                from kmdr.core.console import emit
+
+                emit(RuntimeError(f"参数解析失败，退出代码 {exc.code}"))
+                flush_emit()
+            return int(exc.code) if isinstance(exc.code, int) else 2
+        except Exception as exc:
+            with toolcall_output_handler(self._emit_line):
+                from kmdr.core.console import emit
+
+                emit(exc)
+                flush_emit()
+            return getattr(exc, "code", 50)
+
+    @staticmethod
+    def _parse_args(command_args: list[str]) -> argparse.Namespace:
+        from kmdr.core.defaults import argument_parser
+
+        parser = argument_parser()
+        namespace = parser.parse_args(command_args)
+        if namespace.command is None:
+            parser.print_help()
+        return namespace
+
+    @staticmethod
+    def _extract_kmdr_args(args: list[str]) -> list[str]:
+        if "--kmdr-cli" in args:
+            index = args.index("--kmdr-cli")
+            return args[index + 1 :]
+
+        if "-m" in args:
+            index = args.index("-m")
+            if index + 1 < len(args) and args[index + 1] == "kmdr.main":
+                return args[index + 2 :]
+
+        executable_name = ntpath.basename(args[0]) if args and "\\" in args[0] else os.path.basename(args[0]) if args else ""
+        if executable_name.lower() in {"kmdr-cli.exe", "kmdr-cli"}:
+            return args[1:]
+
+        return args
+
+    @staticmethod
+    def _cancel_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        if not pending:
+            return
+
+        for task in pending:
+            task.cancel()
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+
 class KmdrDesktopApp:
     def __init__(self, root):
         import tkinter as tk
@@ -486,6 +606,8 @@ class KmdrDesktopApp:
         self._builder = KmdrCommandBuilder()
         self._events: queue.Queue = queue.Queue()
         self._process: Optional[subprocess.Popen] = None
+        self._inline_runner: Optional[InlineKmdrCommandRunner] = None
+        self._command_running = False
         self._worker: Optional[threading.Thread] = None
         self._result_handler: Optional[Callable[[dict], None]] = None
         self._search_results: list[dict] = []
@@ -1309,10 +1431,11 @@ class KmdrDesktopApp:
         self._start_command("查看当前配置", self._builder.config_list(), self._render_config_result)
 
     def _start_command(self, label: str, args: list[str], result_handler: Callable[[dict], None]) -> None:
-        if self._process is not None:
+        if self._command_running:
             self._messagebox.showinfo("任务运行中", "请等待当前任务结束，或先停止当前任务。")
             return
 
+        self._command_running = True
         self._result_handler = result_handler
         self._status_var.set(f"{label}运行中...")
         self._stop_button.configure(state="normal")
@@ -1323,6 +1446,16 @@ class KmdrDesktopApp:
 
     def _run_process(self, label: str, args: list[str]) -> None:
         try:
+            if _command_mode() == "inline":
+                runner = InlineKmdrCommandRunner(lambda line: self._events.put(("line", line)))
+                self._inline_runner = runner
+                try:
+                    returncode = runner.run(args)
+                finally:
+                    self._inline_runner = None
+                self._events.put(("done", label, returncode))
+                return
+
             self._process = subprocess.Popen(
                 args,
                 stdout=subprocess.PIPE,
@@ -1360,6 +1493,8 @@ class KmdrDesktopApp:
                 self._append_log(f"[{event[1]}] {event[2]}")
                 self._status_var.set(f"{event[1]}失败")
                 self._process = None
+                self._inline_runner = None
+                self._command_running = False
                 self._stop_button.configure(state="disabled")
 
         self._root.after(100, self._poll_events)
@@ -1389,6 +1524,8 @@ class KmdrDesktopApp:
 
     def _handle_process_done(self, label: str, returncode: int) -> None:
         self._process = None
+        self._inline_runner = None
+        self._command_running = False
         self._stop_button.configure(state="disabled")
 
         if returncode == 0:
@@ -1463,18 +1600,24 @@ class KmdrDesktopApp:
         self._log_text.configure(state="disabled")
 
     def _stop_current_process(self) -> None:
-        if self._process is None:
+        if not self._command_running:
             return
 
-        self._process.terminate()
+        if self._inline_runner is not None:
+            self._inline_runner.terminate()
+        elif self._process is not None:
+            self._process.terminate()
         self._append_log("[GUI] 已请求停止当前任务。")
 
     def _on_close(self) -> None:
-        if self._process is not None:
+        if self._command_running:
             should_close = self._messagebox.askyesno("任务运行中", "当前任务仍在运行，是否停止任务并退出？")
             if not should_close:
                 return
-            self._process.terminate()
+            if self._inline_runner is not None:
+                self._inline_runner.terminate()
+            elif self._process is not None:
+                self._process.terminate()
         self._root.destroy()
 
 
