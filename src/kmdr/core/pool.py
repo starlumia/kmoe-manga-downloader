@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Optional
 
-from .defaults import Configurer
+from .runtime import Configurer
 from .structure import Credential, CredentialStatus, QuotaInfo
 from .utils import calc_reset_time
 

@@ -3,15 +3,13 @@
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
-
 
 project_root = Path.cwd()
 src_path = str(project_root / "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
-hiddenimports = collect_submodules("kmdr")
+hiddenimports = []
 
 gui = Analysis(
     ["src/kmdr/windows_gui.py"],
@@ -22,7 +20,7 @@ gui = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["kmdr.main", "kmdr.windows_cli"],
     noarchive=False,
 )
 gui_pyz = PYZ(gui.pure)

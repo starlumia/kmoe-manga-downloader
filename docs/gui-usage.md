@@ -4,7 +4,7 @@
 
 ## 功能范围
 
-图形界面是对现有 `kmdr` 命令行能力的封装，不改变原有下载核心。当前支持：
+图形界面复用现有 `kmdr` 的底层网络、解析、认证和下载模块，但不再通过 CLI 子进程执行任务。当前支持：
 
 - 登录并保存 Cookie
 - 查看账户状态
@@ -44,8 +44,8 @@ scripts\build_windows.bat
 1. 选择可用的 Python 3.12、3.11 或 3.14。
 2. 在 Windows 本地临时目录创建隔离的构建虚拟环境。
 3. 安装运行依赖和 PyInstaller。
-4. 直接从源码生成 Windows GUI 与后台 CLI。
-5. 把可运行目录复制到桌面。
+4. 直接从源码生成 Windows GUI。
+5. 把可运行目录复制到桌面的带时间戳目录。
 
 临时构建产物位于：
 
@@ -56,10 +56,10 @@ scripts\build_windows.bat
 脚本会复制一份到：
 
 ```text
-%USERPROFILE%\Desktop\Kmoe Manga Downloader\
+%USERPROFILE%\Desktop\Kmoe Manga Downloader yyyyMMdd-HHmmss\
 ```
 
-最终请使用桌面上的本地副本。这样可以避开 WSL 映射盘上的文件锁和 Python DLL 加载问题。
+最终请使用桌面上的本地副本。这样可以避开 WSL 映射盘上的文件锁和 Python DLL 加载问题。脚本不会覆盖或删除桌面上已有的 `Kmoe Manga Downloader` 目录。
 
 ### 运行
 
@@ -69,16 +69,13 @@ scripts\build_windows.bat
 Kmoe Manga Downloader.exe
 ```
 
-不要只复制单个 exe。分发时需要保留整个目录：
+目录版不要只复制单个 exe。分发时需要保留整个目录：
 
 ```text
 Kmoe Manga Downloader\
 ```
 
-其中：
-
-- `Kmoe Manga Downloader.exe` 是图形界面入口
-- `kmdr-cli.exe` 是 GUI 后台调用的命令入口
+其中 `Kmoe Manga Downloader.exe` 是图形界面入口，GUI 后端已经内置在同一个程序里。
 
 如果从 `\\wsl.localhost\...` 直接运行出现 `failed to load python DLL`，请改用桌面上的本地副本。
 
@@ -175,6 +172,8 @@ Cookie 会写入当前用户的 `.kmdr` 配置目录，后续下载可复用。
 
 下载日志会显示在窗口底部，进度条会跟随下载状态更新。
 
+默认保存目录是当前用户的 `Downloads\Kmoe Manga Downloads`。建议保持下载内容和程序目录分开，升级或替换程序时不会影响已经下载好的漫画。
+
 ### 4. 预估下载计划
 
 在 `下载` 页填写参数后，点击：
@@ -183,7 +182,7 @@ Cookie 会写入当前用户的 `.kmdr` 配置目录，后续下载可复用。
 预估下载计划
 ```
 
-程序会调用命令行的计划输出能力，只查看将要下载的内容，不直接下载文件。
+程序会调用 GUI 后端的计划输出能力，只查看将要下载的内容，不直接下载文件。
 
 ### 5. 配置默认项
 
@@ -206,11 +205,11 @@ Cookie 会写入当前用户的 `.kmdr` 配置目录，后续下载可复用。
 
 ### 能不能只发一个 exe
 
-当前版本不要只发单个 exe。请压缩并分发整个 `Kmoe Manga Downloader` 目录。
+Release 单文件版可以只发 `Kmoe-Manga-Downloader.exe`。如果使用本地脚本生成的是目录版，请压缩并分发整个 `Kmoe Manga Downloader` 目录。
 
-### 为什么 Windows 下有两个 exe
+### 为什么现在只有一个入口 exe
 
-GUI 是无控制台窗口程序，后台 CLI 负责执行原有 `kmdr` 命令。拆成两个 exe 可以让 GUI 稳定读取后台输出和进度。
+旧版 GUI 会调用后台 CLI。当前重构版已经把 GUI 后端拆出为进程内服务，登录、搜索、解析卷列表和下载都直接调用底层模块，不再需要 `kmdr-cli.exe`。
 
 ### 配置和 Cookie 保存在哪里
 

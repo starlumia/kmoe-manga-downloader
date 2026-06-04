@@ -1,76 +1,15 @@
-import argparse
-import asyncio
 import base64
 import hashlib
 import hmac
 import json
-import ntpath
 import os
 import queue
-import shlex
-import subprocess
-import sys
 import threading
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Callable, Optional
 
-
-def _default_python_executable() -> str:
-    configured = os.environ.get("KMDR_CLI_PYTHON", "").strip()
-    if configured:
-        return configured
-
-    bundled_cli = _bundled_cli_executable()
-    if bundled_cli:
-        return bundled_cli
-
-    executable = sys.executable
-    if os.name == "nt" and executable.lower().endswith("pythonw.exe"):
-        python_exe = os.path.join(os.path.dirname(executable), "python.exe")
-        if os.path.exists(python_exe):
-            return python_exe
-    return executable
-
-
-def _subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-
-    if getattr(sys, "frozen", False):
-        return env
-
-    src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pythonpath = env.get("PYTHONPATH")
-    if pythonpath:
-        env["PYTHONPATH"] = os.pathsep.join([src_dir, pythonpath])
-    else:
-        env["PYTHONPATH"] = src_dir
-
-    return env
-
-
-def _subprocess_creation_flags() -> int:
-    if os.name == "nt":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
-
-
-def _bundled_cli_executable() -> Optional[str]:
-    if not getattr(sys, "frozen", False):
-        return None
-
-    path_module = ntpath if os.name == "nt" else os.path
-    executable_dir = path_module.dirname(sys.executable)
-    executable_name = "kmdr-cli.exe" if os.name == "nt" else "kmdr-cli"
-    candidate = path_module.join(executable_dir, executable_name)
-    if os.path.exists(candidate):
-        return candidate
-
-    if getattr(sys, "_MEIPASS", None):
-        return sys.executable
-
-    return None
+from kmdr.gui_backend import GuiBackend, GuiBackendRunner
+from kmdr.gui_backend import GuiDownloadOptions as DownloadOptions
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -107,35 +46,6 @@ def _get_preferred_font_family(available_families: set[str]) -> Optional[str]:
     return None
 
 
-def _mask_sensitive_args(args: list[str]) -> list[str]:
-    masked = list(args)
-    in_login_command = "login" in masked
-
-    for idx, value in enumerate(masked[:-1]):
-        if value == "--password" or (in_login_command and value == "-p"):
-            masked[idx + 1] = "******"
-
-    return masked
-
-
-def _parse_toolcall_line(line: str) -> Optional[dict]:
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-
-    if isinstance(payload, dict) and payload.get("type") in {"progress", "result"}:
-        return payload
-    return None
-
-
-def _command_mode() -> str:
-    configured = os.environ.get("KMDR_GUI_COMMAND_MODE", "inline").strip().lower()
-    if configured in {"subprocess", "process", "cli"}:
-        return "subprocess"
-    return "inline"
-
-
 def _format_volume_selection(indexes: Iterable[int]) -> str:
     sorted_indexes = sorted(set(indexes))
     if not sorted_indexes:
@@ -154,6 +64,13 @@ def _format_volume_selection(indexes: Iterable[int]) -> str:
 
     ranges.append(str(start) if start == prev else f"{start}-{prev}")
     return ",".join(ranges)
+
+
+def _default_download_dest() -> str:
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        return os.path.join(home, "Downloads", "Kmoe Manga Downloads")
+    return os.getcwd()
 
 
 def _gui_config_path() -> str:
@@ -379,219 +296,6 @@ def _config_with_encrypted_login(config: dict[str, object], username: str, passw
     return updated
 
 
-@dataclass(frozen=True)
-class DownloadOptions:
-    book_url: str
-    dest: str = ""
-    volume: str = "all"
-    vol_type: str = "all"
-    book_format: str = "epub"
-    method: str = "1"
-    proxy: str = ""
-    retry: str = ""
-    callback: str = ""
-    num_workers: str = ""
-    max_size: str = ""
-    limit: str = ""
-    per_cred_ratio: str = ""
-    vip: bool = False
-    disable_multi_part: bool = False
-    try_multi_part: bool = False
-    fake_ua: bool = False
-    use_pool: bool = False
-    explain: bool = False
-
-
-class KmdrCommandBuilder:
-    def __init__(self, python_executable: Optional[str] = None, module: str = "kmdr.main"):
-        self._python_executable = python_executable or _default_python_executable()
-        self._module = module
-
-    def version(self) -> list[str]:
-        return [*self._base(), "version"]
-
-    def login(self, username: str, password: str) -> list[str]:
-        return [*self._base(), "login", "-u", username, "-p", password]
-
-    def status(self, proxy: str = "") -> list[str]:
-        args = [*self._base(), "status"]
-        self._append_optional(args, "-p", proxy)
-        return args
-
-    def search(self, keyword: str, page: str = "1", minimal: bool = False) -> list[str]:
-        args = [*self._base(), "search", keyword]
-        self._append_optional(args, "-p", page)
-        if minimal:
-            args.append("--minimal")
-        return args
-
-    def download(self, options: DownloadOptions) -> list[str]:
-        args = [*self._base(), "download"]
-        self._append_optional(args, "-d", options.dest)
-        self._append_optional(args, "-l", options.book_url)
-        self._append_optional(args, "-v", options.volume)
-        self._append_optional(args, "-t", options.vol_type)
-        self._append_optional(args, "-f", options.book_format)
-        self._append_optional(args, "-m", options.method)
-        self._append_optional(args, "-p", options.proxy)
-        self._append_optional(args, "-r", options.retry)
-        self._append_optional(args, "-c", options.callback)
-        self._append_optional(args, "--num-workers", options.num_workers)
-        self._append_optional(args, "--max-size", options.max_size)
-        self._append_optional(args, "--limit", options.limit)
-        self._append_optional(args, "--per-cred-ratio", options.per_cred_ratio)
-
-        self._append_flag(args, "--vip", options.vip)
-        self._append_flag(args, "--disable-multi-part", options.disable_multi_part)
-        self._append_flag(args, "--try-multi-part", options.try_multi_part)
-        self._append_flag(args, "--fake-ua", options.fake_ua)
-        self._append_flag(args, "--use-pool", options.use_pool)
-        self._append_flag(args, "--explain", options.explain)
-        return args
-
-    def config_list(self) -> list[str]:
-        return [*self._base(), "config", "--list-option"]
-
-    def config_set_base_url(self, base_url: str) -> list[str]:
-        return [*self._base(), "config", "--base-url", base_url]
-
-    def config_set(self, assignments: Iterable[str]) -> list[str]:
-        return [*self._base(), "config", "--set", *list(assignments)]
-
-    def _base(self) -> list[str]:
-        executable_name = ntpath.basename(self._python_executable) if "\\" in self._python_executable else os.path.basename(self._python_executable)
-        if getattr(sys, "frozen", False) and executable_name.lower() in {"kmoe manga downloader.exe", "kmoe.manga.downloader.exe"}:
-            return [self._python_executable, "--kmdr-cli", "--mode", "toolcall"]
-        if executable_name.lower() in {"kmdr-cli.exe", "kmdr-cli"}:
-            return [self._python_executable, "--mode", "toolcall"]
-        return [self._python_executable, "-m", self._module, "--mode", "toolcall"]
-
-    @staticmethod
-    def _append_optional(args: list[str], flag: str, value: Optional[str]) -> None:
-        if value is None:
-            return
-
-        normalized = str(value).strip()
-        if normalized:
-            args.extend([flag, normalized])
-
-    @staticmethod
-    def _append_flag(args: list[str], flag: str, enabled: bool) -> None:
-        if enabled:
-            args.append(flag)
-
-
-class InlineKmdrCommandRunner:
-    def __init__(self, emit_line: Callable[[str], None]):
-        self._emit_line = emit_line
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._task: Optional[asyncio.Task] = None
-
-    def run(self, args: list[str]) -> int:
-        command_args = self._extract_kmdr_args(args)
-        self._loop = asyncio.new_event_loop()
-
-        try:
-            asyncio.set_event_loop(self._loop)
-            self._task = self._loop.create_task(self._run_main(command_args))
-            return self._loop.run_until_complete(self._task)
-        finally:
-            try:
-                self._cancel_pending_tasks(self._loop)
-            finally:
-                asyncio.set_event_loop(None)
-                self._loop.close()
-                self._loop = None
-                self._task = None
-
-    def terminate(self) -> None:
-        if self._loop is None or self._task is None or self._task.done():
-            return
-
-        self._loop.call_soon_threadsafe(self._task.cancel)
-
-    async def _run_main(self, command_args: list[str]) -> int:
-        from kmdr.core.console import flush_emit, reset_emit, toolcall_output_handler
-        from kmdr.core.defaults import Configurer, base_url_var
-        from kmdr.core.error import KmdrError
-        from kmdr.main import main
-
-        reset_emit()
-        base_url_var.set(Configurer().base_url)
-
-        try:
-            with toolcall_output_handler(self._emit_line):
-                namespace = self._parse_args(command_args)
-                await main(namespace)
-                flush_emit()
-            return 0
-        except asyncio.CancelledError:
-            with toolcall_output_handler(self._emit_line):
-                from kmdr.core.console import emit
-
-                emit("操作已取消")
-                flush_emit()
-            return 130
-        except KmdrError as exc:
-            with toolcall_output_handler(self._emit_line):
-                from kmdr.core.console import emit
-
-                emit(exc)
-                flush_emit()
-            return getattr(exc, "code", 50)
-        except SystemExit as exc:
-            with toolcall_output_handler(self._emit_line):
-                from kmdr.core.console import emit
-
-                emit(RuntimeError(f"参数解析失败，退出代码 {exc.code}"))
-                flush_emit()
-            return int(exc.code) if isinstance(exc.code, int) else 2
-        except Exception as exc:
-            with toolcall_output_handler(self._emit_line):
-                from kmdr.core.console import emit
-
-                emit(exc)
-                flush_emit()
-            return getattr(exc, "code", 50)
-
-    @staticmethod
-    def _parse_args(command_args: list[str]) -> argparse.Namespace:
-        from kmdr.core.defaults import argument_parser
-
-        parser = argument_parser()
-        namespace = parser.parse_args(command_args)
-        if namespace.command is None:
-            parser.print_help()
-        return namespace
-
-    @staticmethod
-    def _extract_kmdr_args(args: list[str]) -> list[str]:
-        if "--kmdr-cli" in args:
-            index = args.index("--kmdr-cli")
-            return args[index + 1 :]
-
-        if "-m" in args:
-            index = args.index("-m")
-            if index + 1 < len(args) and args[index + 1] == "kmdr.main":
-                return args[index + 2 :]
-
-        executable_name = ntpath.basename(args[0]) if args and "\\" in args[0] else os.path.basename(args[0]) if args else ""
-        if executable_name.lower() in {"kmdr-cli.exe", "kmdr-cli"}:
-            return args[1:]
-
-        return args
-
-    @staticmethod
-    def _cancel_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        if not pending:
-            return
-
-        for task in pending:
-            task.cancel()
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-
-
 class KmdrDesktopApp:
     def __init__(self, root):
         import tkinter as tk
@@ -603,10 +307,8 @@ class KmdrDesktopApp:
         self._messagebox = messagebox
 
         self._root = root
-        self._builder = KmdrCommandBuilder()
         self._events: queue.Queue = queue.Queue()
-        self._process: Optional[subprocess.Popen] = None
-        self._inline_runner: Optional[InlineKmdrCommandRunner] = None
+        self._backend_runner: Optional[GuiBackendRunner] = None
         self._command_running = False
         self._worker: Optional[threading.Thread] = None
         self._result_handler: Optional[Callable[[dict], None]] = None
@@ -759,6 +461,7 @@ class KmdrDesktopApp:
         log_scroll.grid(row=0, column=1, sticky="ns")
         self._log_text.configure(yscrollcommand=log_scroll.set)
         self._migrate_legacy_login_secret()
+        self._load_initial_backend_config()
 
     def _build_download_tab(self) -> None:
         ttk = self._ttk
@@ -775,7 +478,7 @@ class KmdrDesktopApp:
         ttk.Button(header, text="DOWNLOAD / 开始下载", command=self._start_download, style="Primary.TButton").grid(row=0, column=1, sticky="e")
 
         self._download_book_url = self._tk.StringVar()
-        self._download_dest = self._tk.StringVar(value=os.getcwd())
+        self._download_dest = self._tk.StringVar(value=_default_download_dest())
         self._download_volume = self._tk.StringVar(value="all")
         self._download_vol_type = self._tk.StringVar(value="all")
         self._download_format = self._tk.StringVar(value="epub")
@@ -1208,10 +911,10 @@ class KmdrDesktopApp:
             if payload.get("code") == 0:
                 self._persist_login_preference(username, password)
 
-        self._start_command("登录", self._builder.login(username=username, password=password), handle_login_result)
+        self._start_backend_task("登录", lambda backend: backend.login(username=username, password=password), handle_login_result)
 
     def _start_status(self) -> None:
-        self._start_command("账户状态", self._builder.status(proxy=self._status_proxy.get()), self._render_account_result)
+        self._start_backend_task("账户状态", lambda backend: backend.status(proxy=self._status_proxy.get()), self._render_account_result)
 
     def _start_search(self) -> None:
         keyword = self._search_keyword.get().strip()
@@ -1219,11 +922,7 @@ class KmdrDesktopApp:
             self._messagebox.showwarning("缺少关键词", "请填写搜索关键词。")
             return
 
-        self._start_command(
-            "搜索",
-            self._builder.search(keyword=keyword, page=self._search_page.get()),
-            self._render_search_result,
-        )
+        self._start_backend_task("搜索", lambda backend: backend.search(keyword=keyword, page=self._search_page.get()), self._render_search_result)
 
     def _use_selected_search_result(self) -> None:
         selected = self._search_tree.selection()
@@ -1246,7 +945,7 @@ class KmdrDesktopApp:
             return
 
         self._download_progress["value"] = 0
-        self._start_command("下载", self._builder.download(options), self._render_download_result)
+        self._start_backend_task("下载", lambda backend: backend.download(options), self._render_download_result)
 
     def _explain_download(self) -> None:
         options = self._collect_download_options(explain=True)
@@ -1254,7 +953,7 @@ class KmdrDesktopApp:
             return
 
         self._download_progress["value"] = 0
-        self._start_command("预估下载计划", self._builder.download(options), self._render_download_result)
+        self._start_backend_task("预估下载计划", lambda backend: backend.explain_download(options), self._render_download_result)
 
     def _parse_download_volumes(self) -> None:
         book_url = self._download_book_url.get().strip()
@@ -1286,7 +985,7 @@ class KmdrDesktopApp:
 
         self._download_progress["value"] = 0
         self._clear_parsed_volumes()
-        self._start_command("解析卷列表", self._builder.download(options), self._render_volume_parse_result)
+        self._start_backend_task("解析卷列表", lambda backend: backend.parse_volumes(options), self._render_volume_parse_result)
 
     def _collect_download_options(self, explain: bool) -> Optional[DownloadOptions]:
         if self._selected_parsed_volumes() and not self._apply_selected_volumes(show_message=False):
@@ -1406,7 +1105,7 @@ class KmdrDesktopApp:
         if not base_url:
             self._messagebox.showwarning("缺少镜像站", "请填写镜像站基础 URL。")
             return
-        self._start_command("保存镜像站", self._builder.config_set_base_url(base_url), self._render_config_result)
+        self._start_backend_task("保存镜像站", lambda backend: backend.set_base_url(base_url), self._render_config_result)
 
     def _set_download_defaults(self) -> None:
         assignments = []
@@ -1425,12 +1124,43 @@ class KmdrDesktopApp:
             self._messagebox.showwarning("缺少配置项", "请至少填写一个下载默认项。")
             return
 
-        self._start_command("保存下载默认项", self._builder.config_set(assignments), self._render_config_result)
+        self._start_backend_task("保存下载默认项", lambda backend: backend.set_download_defaults(assignments), self._render_config_result)
 
     def _list_config(self) -> None:
-        self._start_command("查看当前配置", self._builder.config_list(), self._render_config_result)
+        self._start_backend_task("查看当前配置", lambda backend: backend.list_config(), self._render_config_result)
 
-    def _start_command(self, label: str, args: list[str], result_handler: Callable[[dict], None]) -> None:
+    def _load_initial_backend_config(self) -> None:
+        runner = GuiBackendRunner()
+        payload = runner.run(lambda backend: backend.list_config())
+        if payload.get("code") == 0:
+            self._apply_config_payload(payload.get("data") or {})
+            return
+
+        self._append_log(f"[GUI] 读取当前配置失败：{payload.get('msg', '未知错误')}")
+
+    def _apply_config_payload(self, data: dict) -> None:
+        option = data.get("option") if isinstance(data.get("option"), dict) else {}
+
+        self._config_base_url.set(str(data.get("base_url") or ""))
+        self._config_dest.set(str(option.get("dest") or ""))
+        self._config_proxy.set(str(option.get("proxy") or ""))
+        self._config_workers.set(str(option.get("num_workers") or ""))
+        self._config_retry.set(str(option.get("retry") or ""))
+        self._config_format.set(str(option.get("format") or ""))
+
+        if option.get("dest"):
+            self._download_dest.set(str(option["dest"]))
+        if option.get("proxy"):
+            self._download_proxy.set(str(option["proxy"]))
+            self._status_proxy.set(str(option["proxy"]))
+        if option.get("num_workers"):
+            self._download_workers.set(str(option["num_workers"]))
+        if option.get("retry"):
+            self._download_retry.set(str(option["retry"]))
+        if option.get("format"):
+            self._download_format.set(str(option["format"]))
+
+    def _start_backend_task(self, label: str, operation: Callable[[GuiBackend], object], result_handler: Callable[[dict], None]) -> None:
         if self._command_running:
             self._messagebox.showinfo("任务运行中", "请等待当前任务结束，或先停止当前任务。")
             return
@@ -1439,40 +1169,21 @@ class KmdrDesktopApp:
         self._result_handler = result_handler
         self._status_var.set(f"{label}运行中...")
         self._stop_button.configure(state="normal")
-        self._append_log("> " + " ".join(shlex.quote(item) for item in _mask_sensitive_args(args)))
+        self._append_log(f"[GUI] {label}已开始。")
 
-        self._worker = threading.Thread(target=self._run_process, args=(label, args), daemon=True)
+        self._worker = threading.Thread(target=self._run_backend_task, args=(label, operation), daemon=True)
         self._worker.start()
 
-    def _run_process(self, label: str, args: list[str]) -> None:
+    def _run_backend_task(self, label: str, operation: Callable[[GuiBackend], object]) -> None:
         try:
-            if _command_mode() == "inline":
-                runner = InlineKmdrCommandRunner(lambda line: self._events.put(("line", line)))
-                self._inline_runner = runner
-                try:
-                    returncode = runner.run(args)
-                finally:
-                    self._inline_runner = None
-                self._events.put(("done", label, returncode))
-                return
-
-            self._process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=_subprocess_env(),
-                creationflags=_subprocess_creation_flags(),
-            )
-
-            assert self._process.stdout is not None
-            for line in self._process.stdout:
-                self._events.put(("line", line.rstrip("\n")))
-
-            returncode = self._process.wait()
+            runner = GuiBackendRunner(progress_callback=lambda **payload: self._events.put(("progress", payload)))
+            self._backend_runner = runner
+            try:
+                payload = runner.run(operation)
+            finally:
+                self._backend_runner = None
+            self._events.put(("result", payload))
+            returncode = int(payload.get("code", 50)) if isinstance(payload, dict) else 50
             self._events.put(("done", label, returncode))
         except Exception as exc:
             self._events.put(("error", label, str(exc)))
@@ -1485,32 +1196,20 @@ class KmdrDesktopApp:
                 break
 
             kind = event[0]
-            if kind == "line":
-                self._handle_output_line(event[1])
+            if kind == "progress":
+                self._handle_progress(event[1])
+            elif kind == "result" and self._result_handler:
+                self._result_handler(event[1])
             elif kind == "done":
-                self._handle_process_done(event[1], event[2])
+                self._handle_task_done(event[1], event[2])
             elif kind == "error":
                 self._append_log(f"[{event[1]}] {event[2]}")
                 self._status_var.set(f"{event[1]}失败")
-                self._process = None
-                self._inline_runner = None
+                self._backend_runner = None
                 self._command_running = False
                 self._stop_button.configure(state="disabled")
 
         self._root.after(100, self._poll_events)
-
-    def _handle_output_line(self, line: str) -> None:
-        if line:
-            self._append_log(line)
-
-        payload = _parse_toolcall_line(line)
-        if not payload:
-            return
-
-        if payload["type"] == "progress":
-            self._handle_progress(payload)
-        elif payload["type"] == "result" and self._result_handler:
-            self._result_handler(payload)
 
     def _handle_progress(self, payload: dict) -> None:
         status = payload.get("status", "running")
@@ -1522,9 +1221,8 @@ class KmdrDesktopApp:
         else:
             self._status_var.set(f"下载状态: {status}")
 
-    def _handle_process_done(self, label: str, returncode: int) -> None:
-        self._process = None
-        self._inline_runner = None
+    def _handle_task_done(self, label: str, returncode: int) -> None:
+        self._backend_runner = None
         self._command_running = False
         self._stop_button.configure(state="disabled")
 
@@ -1532,12 +1230,14 @@ class KmdrDesktopApp:
             self._status_var.set(f"{label}完成")
         else:
             self._status_var.set(f"{label}退出，代码 {returncode}")
-        self._append_log(f"[{label}] 进程结束，退出代码 {returncode}")
+        self._append_log(f"[{label}] 任务结束，代码 {returncode}")
 
     def _render_account_result(self, payload: dict) -> None:
         self._render_json_to_text(self._account_text, payload)
 
     def _render_config_result(self, payload: dict) -> None:
+        if payload.get("code") == 0:
+            self._apply_config_payload(payload.get("data") or {})
         self._render_json_to_text(self._config_text, payload)
 
     def _render_search_result(self, payload: dict) -> None:
@@ -1603,10 +1303,8 @@ class KmdrDesktopApp:
         if not self._command_running:
             return
 
-        if self._inline_runner is not None:
-            self._inline_runner.terminate()
-        elif self._process is not None:
-            self._process.terminate()
+        if self._backend_runner is not None:
+            self._backend_runner.terminate()
         self._append_log("[GUI] 已请求停止当前任务。")
 
     def _on_close(self) -> None:
@@ -1614,10 +1312,8 @@ class KmdrDesktopApp:
             should_close = self._messagebox.askyesno("任务运行中", "当前任务仍在运行，是否停止任务并退出？")
             if not should_close:
                 return
-            if self._inline_runner is not None:
-                self._inline_runner.terminate()
-            elif self._process is not None:
-                self._process.terminate()
+            if self._backend_runner is not None:
+                self._backend_runner.terminate()
         self._root.destroy()
 
 

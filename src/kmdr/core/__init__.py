@@ -15,7 +15,6 @@ from .bases import (
     SessionManager,
 )
 from .console import debug, exception, info, log
-from .defaults import argument_parser, post_init
 from .error import KmdrError, LoginError
 from .session import KmdrSessionManager
 from .structure import BookInfo, Credential, VolInfo, VolumeType
@@ -31,8 +30,6 @@ __all__ = (
     "exception",
     "info",
     "log",
-    "argument_parser",
-    "post_init",
     "SESSION_MANAGER",
     "AUTHENTICATOR",
     "LISTERS",

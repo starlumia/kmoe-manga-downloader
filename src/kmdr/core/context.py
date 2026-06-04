@@ -6,10 +6,10 @@ from rich.progress import Progress
 from kmdr.core.pool import CredentialPool
 
 from .console import _console, in_toolcall_mode, is_interactive
-from .defaults import (
+from .runtime import (
     Configurer as InnerConfigurer,
 )
-from .defaults import (
+from .runtime import (
     base_url_var,
     progress_definition,
     session_var,

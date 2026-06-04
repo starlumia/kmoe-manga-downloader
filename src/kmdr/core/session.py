@@ -8,9 +8,9 @@ from aiohttp import ClientSession, ClientTimeout, DummyCookieJar
 from .bases import SESSION_MANAGER, SessionManager
 from .console import debug, info
 from .constants import API_ROUTE, BASE_URL
-from .defaults import TRUE_UA
 from .error import InitializationError, RedirectError
 from .protocol import AsyncCtxManager, Supplier
+from .runtime import TRUE_UA
 from .utils import PrioritySorter, async_retry, get_random_ua
 
 

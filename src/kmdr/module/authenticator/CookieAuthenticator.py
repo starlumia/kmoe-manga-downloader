@@ -1,3 +1,5 @@
+from typing import Optional
+
 from kmdr.core import AUTHENTICATOR, Authenticator, LoginError
 from kmdr.core.console import emit, is_interactive
 from kmdr.core.structure import Credential
@@ -5,10 +7,12 @@ from kmdr.core.structure import Credential
 
 @AUTHENTICATOR.register()
 class CookieAuthenticator(Authenticator):
-    def __init__(self, auto_save: bool = True, *args, **kwargs):
-        super().__init__(auto_save=auto_save, *args, **kwargs)
+    def __init__(self, auto_save: bool = True, show_quota: Optional[bool] = None, *args, **kwargs):
+        super().__init__(*args, auto_save=auto_save, **kwargs)
 
-        if "command" in kwargs and kwargs["command"] == "status":
+        if show_quota is not None:
+            self._show_quota = show_quota
+        elif "command" in kwargs and kwargs["command"] == "status":
             self._show_quota = is_interactive()
         else:
             self._show_quota = False

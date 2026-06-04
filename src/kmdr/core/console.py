@@ -20,11 +20,23 @@ _console_config = dict[str, Any](
     log_time_format="[%Y-%m-%d %H:%M:%S]",
 )
 
-try:
-    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="backslashreplace")
+def _console_output_stream():
+    for stream in (getattr(sys, "stdout", None), getattr(sys, "__stdout__", None)):
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+
+        try:
+            return io.TextIOWrapper(buffer, encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, io.UnsupportedOperation, ValueError, OSError):
+            continue
+
+    return None
+
+
+utf8_stdout = _console_output_stream()
+if utf8_stdout is not None:
     _console_config["file"] = utf8_stdout
-except io.UnsupportedOperation:
-    pass
 
 _console = Console(**_console_config)
 apply_status_patch(_console)  # Monkey patch

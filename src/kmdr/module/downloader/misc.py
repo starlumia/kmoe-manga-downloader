@@ -10,11 +10,12 @@ from kmdr.core.structure import BookInfo, VolInfo
 
 
 class DownloadTracker:
-    def __init__(self, total: int):
+    def __init__(self, total: int, progress_callback: Optional[Callable[..., None]] = None):
         self._total = total
         self._completed = 0
         self._failed = 0
         self._skipped = 0
+        self._progress_callback = progress_callback
 
     @property
     def total(self) -> int:
@@ -33,9 +34,6 @@ class DownloadTracker:
         return self._skipped
 
     def __call__(self, status: str, **kwargs):
-        if not in_toolcall_mode():
-            return
-
         if status == "completed":
             self._completed += 1
         elif status == "failed":
@@ -43,7 +41,12 @@ class DownloadTracker:
         elif status == "skipped":
             self._skipped += 1
 
-        emit_progress(status=status, **kwargs)
+        payload = {"status": status, **kwargs}
+        if self._progress_callback:
+            self._progress_callback(**payload)
+
+        if in_toolcall_mode():
+            emit_progress(**payload)
 
 
 def construct_callback(callback: Optional[str]) -> Optional[Callable]:
@@ -148,4 +151,3 @@ class StateManager:
             debug("分片", part_id, "请求状态更新为", status)
             self._part_states[part_id] = status
             self._update_status()
-

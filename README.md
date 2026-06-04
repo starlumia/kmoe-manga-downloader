@@ -2,9 +2,9 @@
 
 一个面向 Windows 用户的 Kmoe 漫画下载图形界面。
 
-本项目基于原 `kmdr / Kmoe Manga Downloader` 终端应用开发。原项目提供了登录、搜索、卷信息解析、下载、断点重试、配置持久化等核心能力；这个 fork 在此基础上增加了更适合普通用户使用的 GUI、Windows 打包和 Release 单文件 exe。
+本项目基于原 `kmdr / Kmoe Manga Downloader` 终端应用开发。原项目提供了登录、搜索、卷信息解析、下载、断点重试、配置持久化等核心能力；这个 fork 在此基础上重构出独立 GUI 后端，并提供更适合普通用户使用的 Windows 图形界面和 Release exe。
 
-感谢原 TUI/CLI 项目作者和维护者的工作。本项目不会替换原来的命令行能力，只是把常用流程封装成更容易点击操作的界面。
+感谢原 TUI/CLI 项目作者和维护者的工作。本项目不会替换原来的命令行能力；GUI 版已经不再启动或依赖额外的 CLI 进程，而是直接调用底层网络解析和下载模块。
 
 ## 下载
 
@@ -20,7 +20,6 @@ Release 资产说明：
 
 - `Kmoe-Manga-Downloader.exe`：单文件 GUI 版，推荐普通用户下载。
 - `Kmoe-Manga-Downloader-Windows.zip`：目录版，适合需要保留完整打包目录的情况。
-- `kmdr-cli.exe`：命令行版本，适合熟悉终端的用户。
 
 单文件 exe 已包含 Python 运行时和项目依赖，目标机器不需要安装 Python、Poetry 或依赖包。首次启动可能略慢，因为程序会先解包到临时目录。
 
@@ -86,6 +85,8 @@ Kmoe-Manga-Downloader.exe
 
 下载进度和错误信息会显示在日志区域。窗口内容较多时，可以使用鼠标滚轮滚动页面；如果屏幕较小，也可以在底部调整 `界面字号`。
 
+GUI 默认把漫画保存到当前用户的 `Downloads\Kmoe Manga Downloads`，建议不要把下载内容放进程序目录。
+
 ## 常用功能
 
 - `预估下载计划`：只解析将要下载的内容，不真正下载。
@@ -103,7 +104,7 @@ kmdr search <keyword>
 kmdr download -l <book-url> -v 1-3
 ```
 
-GUI 内部也是调用这些能力完成登录、搜索、解析和下载，所以两套入口共享同一套下载核心。
+GUI 与 CLI 共享同一套底层协议解析、认证和下载核心，但 GUI 运行时不再通过 `argparse`、命令字符串、子进程或 toolcall stdout 调用 CLI。
 
 更多说明：
 

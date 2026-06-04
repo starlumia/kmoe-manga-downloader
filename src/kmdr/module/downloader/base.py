@@ -23,6 +23,7 @@ class BaseDownloader(Downloader):
         retry: int = 3,
         num_workers: int = 8,
         explain: bool = False,
+        progress_callback: Optional[Callable[..., None]] = None,
         *args,
         **kwargs,
     ):
@@ -34,16 +35,17 @@ class BaseDownloader(Downloader):
         self._retry: int = retry
         self._semaphore = asyncio.Semaphore(num_workers)
         self._explain: bool = explain
+        self._progress_callback = progress_callback
 
     async def download(self, cred: Credential, book: BookInfo, volumes: list[VolInfo]):
         if not volumes:
             info("没有可下载的卷。", style="blue")
-            emit(book=book.name, total=0, completed=0, failed=0, skipped=0)
-            return
+            summary = {"book": book.name, "total": 0, "completed": 0, "failed": 0, "skipped": 0}
+            emit(**summary)
+            return summary
 
         if self._explain:
-            await self._explain_download(cred, book, volumes)
-            return
+            return await self._explain_download(cred, book, volumes)
 
         total_size = sum(v.size or 0 for v in volumes)
         avai = self._avai_quota(cred)
@@ -60,7 +62,7 @@ class BaseDownloader(Downloader):
             else:
                 log(f"[red]警告：当前下载所需额度约为 {total_size:.2f} MB，当前剩余额度 {avai:.2f} MB，可能无法正常完成下载。[/red]")
 
-        tracker = DownloadTracker(len(volumes))
+        tracker = DownloadTracker(len(volumes), progress_callback=self._progress_callback)
         try:
             with self._progress:
                 tasks = [
@@ -81,13 +83,16 @@ class BaseDownloader(Downloader):
             raise
         finally:
             # 工具调用模式下的最终汇总输出
-            emit(
-                book=book.name,
-                total=tracker.total,
-                completed=tracker.completed,
-                failed=tracker.failed,
-                skipped=tracker.skipped,
-            )
+            summary = {
+                "book": book.name,
+                "total": tracker.total,
+                "completed": tracker.completed,
+                "failed": tracker.failed,
+                "skipped": tracker.skipped,
+            }
+            emit(**summary)
+
+        return summary
 
     def _avai_quota(self, cred: Credential) -> float:
         """计算并返回指定 Credential 的可用额度（单位：MB）"""
@@ -112,46 +117,47 @@ class BaseDownloader(Downloader):
                 else:
                     to_download.append(volume)
 
+        estimate_size = sum(v.size or 0 for v in to_download)
+        target_path = path.abspath(destination)
+
+        def volume_summary(volume: VolInfo) -> dict:
+            type_code = {
+                "VOLUME": "vol",
+                "EXTRA": "extra",
+                "SERIALIZED": "seri",
+            }[volume.vol_type.name]
+
+            return {
+                "id": volume.id,
+                "index": volume.index,
+                "name": volume.name,
+                "type": type_code,
+                "type_label": volume.vol_type.value,
+                "pages": volume.pages,
+                "size": volume.size,
+                "is_last": volume.is_last,
+                "extra_info": volume.extra_info,
+            }
+
+        plan = {
+            "book": book.name,
+            "estimate_quota_usage_mb": round(estimate_size, 2),
+            "avai_quota_mb": round(self._avai_quota(cred), 2),
+            "format": self._format.name,
+            "target_path": target_path,
+            "volumes": [volume_summary(v) for v in volumes],
+            "to_download": [volume_summary(v) for v in to_download],
+            "skipped": [volume_summary(v) for v in skipped],
+        }
+
         if in_toolcall_mode():
-            estimate_size = sum(v.size or 0 for v in to_download)
-            target_path = path.abspath(destination)
+            emit(**plan)
+            return plan
 
-            def volume_summary(volume: VolInfo) -> dict:
-                type_code = {
-                    "VOLUME": "vol",
-                    "EXTRA": "extra",
-                    "SERIALIZED": "seri",
-                }[volume.vol_type.name]
-
-                return {
-                    "id": volume.id,
-                    "index": volume.index,
-                    "name": volume.name,
-                    "type": type_code,
-                    "type_label": volume.vol_type.value,
-                    "pages": volume.pages,
-                    "size": volume.size,
-                    "is_last": volume.is_last,
-                    "extra_info": volume.extra_info,
-                }
-
-            emit(
-                book=book.name,
-                estimate_quota_usage_mb=round(estimate_size, 2),
-                avai_quota_mb=round(self._avai_quota(cred), 2),
-                format=self._format.name,
-                target_path=target_path,
-                volumes=[volume_summary(v) for v in volumes],
-                to_download=[volume_summary(v) for v in to_download],
-                skipped=[volume_summary(v) for v in skipped],
-            )
-        else:
+        if is_interactive():
             from rich.markdown import Markdown
             from rich.panel import Panel
             from rich.table import Table
-
-            estimate_size = sum(v.size or 0 for v in to_download)
-            target_path = path.abspath(destination)
 
             self._console.print(Markdown(f"# 下载计划预估：{book.name}"))
             self._console.print()
@@ -190,6 +196,8 @@ class BaseDownloader(Downloader):
                 grid.add_row(*renderables)
                 self._console.print(grid)
                 self._console.print()
+
+        return plan
 
     @abstractmethod
     async def _download(

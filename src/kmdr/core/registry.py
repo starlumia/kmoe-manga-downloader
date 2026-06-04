@@ -1,9 +1,8 @@
-from argparse import Namespace
 from dataclasses import dataclass, field
-from typing import Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar
 
 from .console import debug
-from .defaults import combine_args
+from .runtime import combine_args
 
 T = TypeVar("T")
 
@@ -19,7 +18,7 @@ class Registry(Generic[T]):
         hasattrs: frozenset[str] = frozenset(),
         containattrs: frozenset[str] = frozenset(),
         hasvalues: dict[str, object] = dict(),
-        predicate: Optional[Callable[[Namespace], bool]] = None,
+        predicate: Optional[Callable[[Any], bool]] = None,
         order: int = 0,
         name: Optional[str] = None,
     ):
@@ -75,13 +74,13 @@ class Registry(Generic[T]):
 
         return wrapper
 
-    def get(self, condition: Namespace) -> T:
+    def get(self, condition: Any) -> T:
         if self._combine_args:
             condition = combine_args(condition)
             debug("合并默认参数后，条件为:", condition)
         return self._get(condition)
 
-    def _get(self, condition: Namespace) -> T:
+    def _get(self, condition: Any) -> T:
         if not self._modules or len(self._modules) == 0:
             raise ValueError(f"{self._name} has no registered modules")
 
@@ -105,7 +104,7 @@ class Registry(Generic[T]):
 
         raise ValueError(f"{self._name} does not have a module for {condition}")
 
-    def _filter_nonone_args(self, condition: Namespace) -> dict[str, object]:
+    def _filter_nonone_args(self, condition: Any) -> dict[str, object]:
         return {k: v for k, v in vars(condition).items() if v is not None}
 
 
@@ -116,7 +115,7 @@ class Predication:
     hasattrs: frozenset[str] = frozenset({})
     containattrs: frozenset[str] = frozenset({})
     hasvalues: dict[str, object] = field(default_factory=dict)
-    predicate: Optional[Callable[[Namespace], bool]] = None
+    predicate: Optional[Callable[[Any], bool]] = None
 
     order: int = 0
 

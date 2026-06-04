@@ -1,6 +1,6 @@
 from kmdr.core import CONFIGURER, Configurer
 from kmdr.core.console import emit, info
-from kmdr.core.defaults import base_url_var
+from kmdr.core.runtime import base_url_var
 
 
 @CONFIGURER.register()

@@ -8,9 +8,9 @@ pushd "%~dp0\.." || (
 
 set "PYTHON_CMD="
 
-py -3.12 -c "import sys" >nul 2>nul && set "PYTHON_CMD=py -3.12"
+py -3.14 -c "import sys" >nul 2>nul && set "PYTHON_CMD=py -3.14"
+if not defined PYTHON_CMD py -3.12 -c "import sys" >nul 2>nul && set "PYTHON_CMD=py -3.12"
 if not defined PYTHON_CMD py -3.11 -c "import sys" >nul 2>nul && set "PYTHON_CMD=py -3.11"
-if not defined PYTHON_CMD py -3.14 -c "import sys" >nul 2>nul && set "PYTHON_CMD=py -3.14"
 if not defined PYTHON_CMD python -c "import sys; raise SystemExit(0 if sys.version_info[:2] in ((3, 11), (3, 12), (3, 14)) else 1)" >nul 2>nul && set "PYTHON_CMD=python"
 
 if not defined PYTHON_CMD (
@@ -97,24 +97,16 @@ if not exist "%PACKAGE_DIR%\Kmoe Manga Downloader.exe" (
     exit /b 1
 )
 
-if not exist "%PACKAGE_DIR%\kmdr-cli.exe" (
-    echo Build finished, but the CLI executable was not found:
-    echo %PACKAGE_DIR%\kmdr-cli.exe
-    popd
-    exit /b 1
-)
-
-set "LOCAL_DIST=%USERPROFILE%\Desktop\Kmoe Manga Downloader"
-if exist "%LOCAL_DIST%" rmdir /s /q "%LOCAL_DIST%"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "BUILD_ID=%%i"
+set "LOCAL_DIST=%USERPROFILE%\Desktop\Kmoe Manga Downloader %BUILD_ID%"
 if exist "%LOCAL_DIST%" (
-    echo Failed to replace the desktop package directory:
+    echo Desktop package directory already exists:
     echo %LOCAL_DIST%
-    echo Close any running copy of Kmoe Manga Downloader and try again.
     popd
     exit /b 1
 )
 
-robocopy "%PACKAGE_DIR%" "%LOCAL_DIST%" /MIR >nul
+robocopy "%PACKAGE_DIR%" "%LOCAL_DIST%" /E >nul
 if errorlevel 8 (
     echo Failed to copy build output to "%LOCAL_DIST%".
     popd
