@@ -1,5 +1,9 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
+
+set "REBUILD_ENV=0"
+if /I "%~1"=="--rebuild-env" set "REBUILD_ENV=1"
+if /I "%~1"=="--clean-env" set "REBUILD_ENV=1"
 
 pushd "%~dp0\.." || (
     echo Failed to enter project directory.
@@ -29,12 +33,30 @@ if not defined PYTHON_CMD (
 echo Using Python:
 %PYTHON_CMD% --version
 
+for /f %%i in ('%PYTHON_CMD% -c "import sys; print(chr(112)+chr(121)+str(sys.version_info.major)+str(sys.version_info.minor))"') do set "PYTHON_KEY=%%i"
+if not defined PYTHON_KEY (
+    echo Failed to detect Python version key.
+    popd
+    exit /b 1
+)
+
 set "BUILD_ROOT=%TEMP%\kmoe-manga-downloader-build"
 set "BUILD_WORK=%BUILD_ROOT%\build"
 set "BUILD_DIST=%BUILD_ROOT%\dist"
-set "VENV_DIR=%BUILD_ROOT%\venv"
+if not defined LOCALAPPDATA set "LOCALAPPDATA=%USERPROFILE%\AppData\Local"
+set "BUILD_ENV_ROOT=%LOCALAPPDATA%\KmoeMangaDownloader\build-env"
+set "VENV_DIR=%BUILD_ENV_ROOT%\%PYTHON_KEY%"
 set "BUILD_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "PACKAGE_DIR=%BUILD_DIST%\Kmoe Manga Downloader"
+set "REQ_FILE=%CD%\scripts\windows-build-requirements.txt"
+set "STAMP_FILE=%VENV_DIR%\.requirements.sha256"
+
+if not exist "%REQ_FILE%" (
+    echo Windows build requirements file was not found:
+    echo %REQ_FILE%
+    popd
+    exit /b 1
+)
 
 if exist "%BUILD_ROOT%" rmdir /s /q "%BUILD_ROOT%"
 if exist "%BUILD_ROOT%" (
@@ -57,11 +79,30 @@ mkdir "%BUILD_DIST%" || (
     exit /b 1
 )
 
-%PYTHON_CMD% -m venv "%VENV_DIR%"
-if errorlevel 1 (
-    echo Failed to create local build virtual environment.
+if not exist "%BUILD_ENV_ROOT%" mkdir "%BUILD_ENV_ROOT%" || (
+    echo Failed to create persistent build environment directory:
+    echo %BUILD_ENV_ROOT%
     popd
     exit /b 1
+)
+
+if "%REBUILD_ENV%"=="1" (
+    if exist "%VENV_DIR%" (
+        echo Rebuilding persistent Windows build environment:
+        echo %VENV_DIR%
+        rmdir /s /q "%VENV_DIR%"
+    )
+)
+
+if not exist "%BUILD_PYTHON%" (
+    echo Creating persistent Windows build environment:
+    echo %VENV_DIR%
+    %PYTHON_CMD% -m venv "%VENV_DIR%"
+    if errorlevel 1 (
+        echo Failed to create persistent build virtual environment.
+        popd
+        exit /b 1
+    )
 )
 
 if not exist "%BUILD_PYTHON%" (
@@ -71,11 +112,39 @@ if not exist "%BUILD_PYTHON%" (
     exit /b 1
 )
 
-"%BUILD_PYTHON%" -m pip install "aiofiles~=24.1.0" "aiohttp~=3.12.15" "beautifulsoup4~=4.13.4" "customtkinter~=5.2.2" "rich~=13.9.4" "typing-extensions~=4.15.0" "yarl~=1.20.1" "pyinstaller"
-if errorlevel 1 (
-    echo Failed to install build dependencies.
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:REQ_FILE).Hash"`) do set "REQ_HASH=%%i"
+if not defined REQ_HASH (
+    echo Failed to calculate requirements hash.
     popd
     exit /b 1
+)
+
+set "INSTALL_DEPS=0"
+if not exist "%STAMP_FILE%" set "INSTALL_DEPS=1"
+if exist "%STAMP_FILE%" (
+    set "EXISTING_REQ_HASH="
+    set /p EXISTING_REQ_HASH=<"%STAMP_FILE%"
+    if /I not "!EXISTING_REQ_HASH!"=="%REQ_HASH%" set "INSTALL_DEPS=1"
+)
+
+if "%INSTALL_DEPS%"=="0" (
+    "%BUILD_PYTHON%" -c "import PyInstaller, aiofiles, aiohttp, bs4, customtkinter, rich, yarl" >nul 2>nul
+    if errorlevel 1 set "INSTALL_DEPS=1"
+)
+
+if "%INSTALL_DEPS%"=="1" (
+    echo Installing Windows build dependencies from:
+    echo %REQ_FILE%
+    "%BUILD_PYTHON%" -m pip --disable-pip-version-check install -r "%REQ_FILE%"
+    if errorlevel 1 (
+        echo Failed to install build dependencies.
+        popd
+        exit /b 1
+    )
+    > "%STAMP_FILE%" echo %REQ_HASH%
+) else (
+    echo Persistent Windows build environment is up to date:
+    echo %VENV_DIR%
 )
 
 set "SOURCE_PATH=%CD%\src"

@@ -13,6 +13,10 @@ from kmdr.gui_backend import GuiBackend, GuiBackendRunner
 from kmdr.gui_backend import GuiDownloadOptions as DownloadOptions
 
 
+# Tk is still used for OS dialogs, message boxes, variables, clipboard,
+# native context menus, and plain Text output widgets. customtkinter does
+# not provide platform-native replacements for the first group, and CTkTextbox
+# changes enough Text behavior that logs and JSON panes intentionally stay on Tk Text.
 def _load_customtkinter() -> Optional[ModuleType]:
     try:
         import customtkinter
@@ -54,6 +58,8 @@ def _appearance_colors(customtkinter: Optional[ModuleType]) -> dict[str, str]:
             "muted": "#a9b1bd",
             "border": "#3f444a",
             "accent": "#1f6aa5",
+            "row": "#2b2b2b",
+            "row_alt": "#303234",
         }
 
     return {
@@ -64,6 +70,8 @@ def _appearance_colors(customtkinter: Optional[ModuleType]) -> dict[str, str]:
         "muted": "#4b5563",
         "border": "#d0d7de",
         "accent": "#1f6aa5",
+        "row": "#ffffff",
+        "row_alt": "#f8fafc",
     }
 
 
@@ -354,11 +362,12 @@ def _config_with_encrypted_login(config: dict[str, object], username: str, passw
 class KmdrDesktopApp:
     def __init__(self, root):
         import tkinter as tk
-        from tkinter import filedialog, messagebox, ttk
+        from tkinter import filedialog, messagebox
 
         self._tk = tk
-        self._ttk = ttk
         self._ctk = _load_customtkinter()
+        if self._ctk is None:
+            raise RuntimeError("无法启动图形界面：当前环境未安装 customtkinter。")
         _configure_customtkinter(self._ctk)
         self._filedialog = filedialog
         self._messagebox = messagebox
@@ -372,12 +381,11 @@ class KmdrDesktopApp:
         self._search_results: list[dict] = []
         self._parsed_volumes: list[dict] = []
         self._gui_config = _load_gui_config()
-        self._active_scroll_canvas = None
-        self._scroll_canvases = []
-        self._wheel_priority_widgets = []
-        self._style = None
-        self._uses_custom_root = self._ctk is not None and isinstance(root, self._ctk.CTk)
-        self._colors = _appearance_colors(self._ctk if self._uses_custom_root else None)
+        self._search_row_widgets: dict[str, object] = {}
+        self._selected_search_items: set[str] = set()
+        self._volume_row_widgets: dict[str, object] = {}
+        self._selected_volume_items: set[str] = set()
+        self._colors = _appearance_colors(self._ctk)
 
         self._configure_root()
         self._build_ui()
@@ -385,10 +393,7 @@ class KmdrDesktopApp:
 
     def _configure_root(self) -> None:
         self._root.title("Kmoe Manga Downloader")
-        if self._uses_custom_root:
-            self._root.configure(fg_color=self._colors["bg"])
-        else:
-            self._root.configure(bg=self._colors["bg"])
+        self._root.configure(fg_color=self._colors["bg"])
         self._root.geometry("1180x820")
         self._root.minsize(900, 620)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -396,16 +401,9 @@ class KmdrDesktopApp:
         self._root.columnconfigure(0, weight=1)
         self._root.rowconfigure(0, weight=1)
 
-        style = self._ttk.Style()
-        try:
-            style.theme_use("clam")
-        except self._tk.TclError:
-            pass
+        self._configure_fonts()
 
-        self._style = style
-        self._configure_fonts(style)
-
-    def _configure_fonts(self, style) -> None:
+    def _configure_fonts(self) -> None:
         from tkinter import font
 
         font_size = _get_env_int("KMDR_GUI_FONT_SIZE", 16)
@@ -444,33 +442,6 @@ class KmdrDesktopApp:
         self._root.option_add("*Listbox.Font", self._ui_font)
         self._root.option_add("*TCombobox*Listbox.font", self._ui_font)
 
-        rowheight = max(34, int(font_size * 2.6))
-        button_padding = (14, 9) if self._ctk is None else (10, 6)
-        primary_padding = (22, 12) if self._ctk is None else (12, 7)
-        style.configure(".", font=self._ui_font)
-        style.configure("TFrame", background=self._colors["bg"])
-        style.configure("TLabel", font=self._ui_font, background=self._colors["bg"], foreground=self._colors["fg"])
-        style.configure("TButton", font=self._ui_font, padding=button_padding)
-        style.configure("Primary.TButton", font=self._heading_font, padding=primary_padding)
-        style.configure("TEntry", font=self._ui_font, padding=(8, 6))
-        style.configure("TCombobox", font=self._ui_font, padding=(8, 6))
-        style.configure("TCheckbutton", font=self._ui_font, padding=(6, 6), background=self._colors["bg"], foreground=self._colors["fg"])
-        style.configure("TLabelframe", background=self._colors["bg"], foreground=self._colors["fg"])
-        style.configure("TLabelframe.Label", font=self._heading_font)
-        style.configure("TNotebook", background=self._colors["bg"], borderwidth=0)
-        style.configure("TNotebook.Tab", font=self._ui_font, padding=(18, 11), background=self._colors["panel"], foreground=self._colors["fg"])
-        style.configure(
-            "Treeview",
-            font=self._ui_font,
-            rowheight=rowheight,
-            background=self._colors["field"],
-            fieldbackground=self._colors["field"],
-            foreground=self._colors["fg"],
-            bordercolor=self._colors["border"],
-        )
-        style.configure("Treeview.Heading", font=self._heading_font, background=self._colors["panel"], foreground=self._colors["fg"])
-        style.map("Treeview", background=[("selected", self._colors["accent"])], foreground=[("selected", "#ffffff")])
-
         self._font_size = font_size
 
     def _font_tuple(self, bold: bool = False, fixed: bool = False) -> tuple:
@@ -482,89 +453,76 @@ class KmdrDesktopApp:
         return family, size
 
     def _frame(self, parent, **kwargs):
-        if self._ctk is not None:
-            kwargs.pop("padding", None)
-            return self._ctk.CTkFrame(parent, fg_color=kwargs.pop("fg_color", "transparent"), **kwargs)
-        return self._ttk.Frame(parent, **kwargs)
+        kwargs.pop("padding", None)
+        return self._ctk.CTkFrame(parent, fg_color=kwargs.pop("fg_color", "transparent"), **kwargs)
 
     def _label_frame(self, parent, text: str, padding: int = 0):
-        if self._ctk is not None:
-            frame = self._ctk.CTkFrame(parent)
-            if text:
-                label = self._ctk.CTkLabel(frame, text=text, font=self._font_tuple(bold=True), anchor="w")
-                label.grid(row=0, column=0, sticky="ew", padx=padding, pady=(padding, 0))
-                frame._kmdr_content_start_row = 1
-            else:
-                frame._kmdr_content_start_row = 0
-            return frame
-        return self._ttk.LabelFrame(parent, text=text, padding=padding)
+        frame = self._ctk.CTkFrame(parent)
+        if text:
+            label = self._ctk.CTkLabel(frame, text=text, font=self._font_tuple(bold=True), anchor="w")
+            label.grid(row=0, column=0, sticky="ew", padx=padding, pady=(padding, 0))
+            frame._kmdr_content_start_row = 1
+        else:
+            frame._kmdr_content_start_row = 0
+        return frame
 
     def _content_row(self, parent, row: int) -> int:
         return row + int(getattr(parent, "_kmdr_content_start_row", 0))
 
     def _label(self, parent, text: Optional[str] = None, textvariable=None, font=None, **kwargs):
-        if self._ctk is not None:
-            options = dict(kwargs)
-            options.setdefault("anchor", "w")
-            if font is not None:
-                options["font"] = font if isinstance(font, tuple) else self._font_tuple(bold=font is self._heading_font)
-            if textvariable is not None:
-                return self._ctk.CTkLabel(parent, textvariable=textvariable, **options)
-            return self._ctk.CTkLabel(parent, text=text or "", **options)
-
+        options = dict(kwargs)
+        options.setdefault("anchor", "w")
+        if font is not None:
+            options["font"] = font if isinstance(font, tuple) else self._font_tuple(bold=font is self._heading_font)
         if textvariable is not None:
-            return self._ttk.Label(parent, textvariable=textvariable, font=font, **kwargs)
-        return self._ttk.Label(parent, text=text or "", font=font, **kwargs)
+            return self._ctk.CTkLabel(parent, textvariable=textvariable, **options)
+        return self._ctk.CTkLabel(parent, text=text or "", **options)
 
     def _button(self, parent, text: str, command: Callable, style: Optional[str] = None, state: str = "normal", **kwargs):
-        if self._ctk is not None:
-            options = dict(kwargs)
-            options.pop("style", None)
-            height = 38 if style == "Primary.TButton" else 34
-            font = self._font_tuple(bold=style == "Primary.TButton")
-            return self._ctk.CTkButton(parent, text=text, command=command, state=state, height=height, font=font, **options)
-        return self._ttk.Button(parent, text=text, command=command, style=style, state=state, **kwargs)
+        options = dict(kwargs)
+        options.pop("style", None)
+        height = 38 if style == "Primary.TButton" else 34
+        font = self._font_tuple(bold=style == "Primary.TButton")
+        return self._ctk.CTkButton(parent, text=text, command=command, state=state, height=height, font=font, **options)
 
     def _entry(self, parent, textvariable, show: Optional[str] = None, width: Optional[int] = None, **kwargs):
-        if self._ctk is not None:
-            options = dict(kwargs)
-            if width is not None:
-                options["width"] = max(80, width * 12)
-            if show is not None:
-                options["show"] = show
-            return self._ctk.CTkEntry(parent, textvariable=textvariable, font=self._font_tuple(), height=34, **options)
-
         options = dict(kwargs)
         if width is not None:
-            options["width"] = width
+            options["width"] = max(80, width * 12)
         if show is not None:
             options["show"] = show
-        return self._ttk.Entry(parent, textvariable=textvariable, **options)
+        return self._ctk.CTkEntry(parent, textvariable=textvariable, font=self._font_tuple(), height=34, **options)
 
     def _combobox(self, parent, textvariable, values: tuple[str, ...], state: str = "readonly", width: Optional[int] = None):
-        if self._ctk is not None:
-            ctk_state = "readonly" if state == "readonly" else state
-            combo_width = 120 if width is None else max(90, width * 12)
-            return self._ctk.CTkComboBox(
-                parent,
-                variable=textvariable,
-                values=list(values),
-                state=ctk_state,
-                width=combo_width,
-                height=34,
-                font=self._font_tuple(),
-            )
-        options = {"textvariable": textvariable, "values": values, "state": state}
-        if width is not None:
-            options["width"] = width
-        return self._ttk.Combobox(parent, **options)
+        ctk_state = "readonly" if state == "readonly" else state
+        combo_width = 120 if width is None else max(90, width * 12)
+        return self._ctk.CTkComboBox(
+            parent,
+            variable=textvariable,
+            values=list(values),
+            state=ctk_state,
+            width=combo_width,
+            height=34,
+            font=self._font_tuple(),
+        )
 
     def _checkbutton(self, parent, text: str, variable, command: Optional[Callable] = None):
-        if self._ctk is not None:
-            return self._ctk.CTkCheckBox(parent, text=text, variable=variable, command=command, font=self._font_tuple())
-        return self._ttk.Checkbutton(parent, text=text, variable=variable, command=command)
+        return self._ctk.CTkCheckBox(parent, text=text, variable=variable, command=command, font=self._font_tuple())
+
+    def _scrollable_frame(self, parent, **kwargs):
+        return self._ctk.CTkScrollableFrame(parent, fg_color=kwargs.pop("fg_color", "transparent"), **kwargs)
+
+    def _progressbar(self, parent):
+        progressbar = self._ctk.CTkProgressBar(parent)
+        progressbar.set(0)
+        return progressbar
+
+    def _set_progress(self, value: float) -> None:
+        self._download_progress.set(max(0.0, min(1.0, value / 100.0)))
 
     def _textbox(self, parent, height: int, state: str):
+        # Tk Text is kept for stable disabled-state log rendering and clipboard-friendly JSON output.
+        # CTkTextbox is a themed wrapper but changes scrolling/state behavior enough to keep this primitive for now.
         return self._tk.Text(
             parent,
             height=height,
@@ -579,28 +537,19 @@ class KmdrDesktopApp:
         )
 
     def _build_ui(self) -> None:
-        ttk = self._ttk
-
         main = self._frame(self._root)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
 
-        self._notebook = ttk.Notebook(main)
+        self._notebook = self._ctk.CTkTabview(main)
         self._notebook.grid(row=0, column=0, sticky="nsew")
 
         self._build_download_tab()
         self._build_search_tab()
         self._build_account_tab()
         self._build_config_tab()
-
-        self._root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-        self._root.bind_all("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
-        self._root.bind_all("<Button-4>", self._on_mousewheel, add="+")
-        self._root.bind_all("<Button-5>", self._on_mousewheel, add="+")
-        self._root.bind_all("<Shift-Button-4>", self._on_shift_mousewheel, add="+")
-        self._root.bind_all("<Shift-Button-5>", self._on_shift_mousewheel, add="+")
 
         controls = self._frame(main)
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 8))
@@ -619,10 +568,7 @@ class KmdrDesktopApp:
             state="readonly",
         )
         font_size_box.grid(row=0, column=2, sticky="e", padx=(0, 8))
-        if self._ctk is not None:
-            font_size_box.configure(command=lambda _value: self._apply_font_size())
-        else:
-            font_size_box.bind("<<ComboboxSelected>>", lambda _event: self._apply_font_size())
+        font_size_box.configure(command=lambda _value: self._apply_font_size())
 
         self._global_download_button = self._button(
             controls,
@@ -645,17 +591,13 @@ class KmdrDesktopApp:
             row=self._content_row(log_frame, 0),
             column=0,
             sticky="nsew",
-            padx=8 if self._ctk is not None else 0,
-            pady=8 if self._ctk is not None else 0,
+            padx=8,
+            pady=8,
         )
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self._log_text.yview)
-        log_scroll.grid(row=self._content_row(log_frame, 0), column=1, sticky="ns", pady=8 if self._ctk is not None else 0)
-        self._log_text.configure(yscrollcommand=log_scroll.set)
         self._migrate_legacy_login_secret()
         self._load_initial_backend_config()
 
     def _build_download_tab(self) -> None:
-        ttk = self._ttk
         frame = self._add_scrollable_tab("下载")
 
         for idx in range(4):
@@ -725,7 +667,7 @@ class KmdrDesktopApp:
         progress_frame = self._frame(frame)
         progress_frame.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         progress_frame.columnconfigure(0, weight=1)
-        self._download_progress = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
+        self._download_progress = self._progressbar(progress_frame)
         self._download_progress.grid(row=0, column=0, sticky="ew")
 
         volume_frame = self._label_frame(frame, text="已解析卷列表", padding=8)
@@ -737,10 +679,9 @@ class KmdrDesktopApp:
         volume_actions.grid(
             row=self._content_row(volume_frame, 0),
             column=0,
-            columnspan=2,
             sticky="ew",
-            padx=8 if self._ctk is not None else 0,
-            pady=(8 if self._ctk is not None else 0, 8),
+            padx=8,
+            pady=(8, 8),
         )
         volume_actions.columnconfigure(4, weight=1)
         self._button(volume_actions, text="解析卷列表", command=self._parse_download_volumes).grid(row=0, column=0, padx=(0, 8))
@@ -748,152 +689,85 @@ class KmdrDesktopApp:
         self._button(volume_actions, text="全选", command=self._select_all_parsed_volumes).grid(row=0, column=2, padx=(0, 8))
         self._button(volume_actions, text="清空选择", command=self._clear_volume_selection).grid(row=0, column=3, padx=(0, 8))
 
-        self._volume_tree = ttk.Treeview(
-            volume_frame,
-            columns=("index", "type", "name", "pages", "size", "extra"),
-            show="headings",
-            selectmode="extended",
-            height=12,
-        )
-        self._volume_tree.heading("index", text="卷号")
-        self._volume_tree.heading("type", text="类型")
-        self._volume_tree.heading("name", text="卷名")
-        self._volume_tree.heading("pages", text="页数")
-        self._volume_tree.heading("size", text="大小 MB")
-        self._volume_tree.heading("extra", text="状态")
-        self._volume_tree.column("index", width=80, anchor="center")
-        self._volume_tree.column("type", width=110, anchor="center")
-        self._volume_tree.column("name", width=360, anchor="w")
-        self._volume_tree.column("pages", width=80, anchor="e")
-        self._volume_tree.column("size", width=90, anchor="e")
-        self._volume_tree.column("extra", width=150, anchor="w")
-        self._volume_tree.grid(
+        self._volume_table = self._frame(volume_frame, fg_color=self._colors["field"])
+        self._volume_table.grid(
             row=self._content_row(volume_frame, 1),
             column=0,
             sticky="nsew",
-            padx=(8, 0) if self._ctk is not None else 0,
-            pady=(0, 8) if self._ctk is not None else 0,
+            padx=8,
+            pady=(0, 8),
         )
+        self._volume_table.columnconfigure(0, weight=1)
 
-        volume_scroll = ttk.Scrollbar(volume_frame, orient="vertical", command=self._volume_tree.yview)
-        volume_scroll.grid(
-            row=self._content_row(volume_frame, 1),
-            column=1,
-            sticky="ns",
-            padx=(0, 8) if self._ctk is not None else 0,
-            pady=(0, 8) if self._ctk is not None else 0,
-        )
-        self._volume_tree.configure(yscrollcommand=volume_scroll.set)
-        self._wheel_priority_widgets.append(self._volume_tree)
+        self._volume_rows_frame = self._scrollable_frame(self._volume_table, height=320)
+        self._volume_rows_frame.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+        self._build_volume_table_header()
+        self._volume_table.rowconfigure(0, weight=1)
 
     def _add_scrollable_tab(self, title: str):
-        ttk = self._ttk
-        outer = ttk.Frame(self._notebook)
-        self._notebook.add(outer, text=title)
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(0, weight=1)
-
-        canvas = self._tk.Canvas(outer, highlightthickness=0, borderwidth=0, background=self._colors["bg"])
-        vertical_scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        horizontal_scroll = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
-        canvas.configure(yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set)
-
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vertical_scroll.grid(row=0, column=1, sticky="ns")
-        horizontal_scroll.grid(row=1, column=0, sticky="ew")
-
-        frame = self._frame(canvas)
-        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
-
-        def update_scroll_region(_event=None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            width = max(canvas.winfo_width(), frame.winfo_reqwidth())
-            canvas.itemconfigure(window_id, width=width)
-
-        frame.bind("<Configure>", update_scroll_region)
-        canvas.bind("<Configure>", update_scroll_region)
-        canvas.bind("<Enter>", lambda _event: self._activate_scroll_canvas(canvas))
-        frame.bind("<Enter>", lambda _event: self._activate_scroll_canvas(canvas))
-        canvas.bind("<Leave>", lambda _event: self._deactivate_scroll_canvas_when_outside(canvas))
-        frame.bind("<Leave>", lambda _event: self._deactivate_scroll_canvas_when_outside(canvas))
-
-        self._scroll_canvases.append((canvas, frame, window_id))
+        self._notebook.add(title)
+        tab = self._notebook.tab(title)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+        frame = self._scrollable_frame(tab)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
         return frame
 
-    def _activate_scroll_canvas(self, canvas) -> None:
-        self._active_scroll_canvas = canvas
+    def _build_table_header(self, parent, columns: tuple[tuple[str, int, str], ...]) -> None:
+        for idx, (_key, weight, title) in enumerate(columns):
+            parent.columnconfigure(idx, weight=weight, minsize=60)
+            label = self._ctk.CTkLabel(parent, text=title, font=self._font_tuple(bold=True), anchor="w", fg_color=self._colors["panel"])
+            label.grid(row=0, column=idx, sticky="ew", padx=0, pady=(0, 1), ipady=6)
 
-    def _deactivate_scroll_canvas_when_outside(self, canvas) -> None:
-        if self._active_scroll_canvas is canvas:
-            self._active_scroll_canvas = None
+    def _build_volume_table_header(self) -> None:
+        self._volume_columns = (
+            ("index", 1, "卷号"),
+            ("type", 1, "类型"),
+            ("name", 4, "卷名"),
+            ("pages", 1, "页数"),
+            ("size", 1, "大小 MB"),
+            ("extra", 2, "状态"),
+        )
+        self._build_table_header(self._volume_table, self._volume_columns)
 
-    def _find_scroll_canvas(self, widget):
-        for canvas, frame, _window_id in self._scroll_canvases:
-            if widget is canvas or self._is_descendant(widget, frame):
-                return canvas
-        return self._active_scroll_canvas
+    def _row_color(self, selected: bool, index: int) -> str:
+        if selected:
+            return self._colors["accent"]
+        return self._colors["row_alt"] if index % 2 else self._colors["row"]
 
-    def _find_priority_scroll_widget(self, widget):
-        for priority_widget in self._wheel_priority_widgets:
-            if widget is priority_widget or self._is_descendant(widget, priority_widget):
-                return priority_widget
-        return None
+    def _bind_row_click(self, widget, callback: Callable) -> None:
+        widget.bind("<Button-1>", callback)
+        for child in widget.winfo_children():
+            self._bind_row_click(child, callback)
 
-    def _is_descendant(self, widget, parent) -> bool:
-        while widget is not None:
-            if widget is parent:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
+    def _bind_cells(self, cells: list, sequence: str, callback: Callable) -> None:
+        for cell in cells:
+            cell.bind(sequence, callback)
 
-    def _wheel_units(self, event) -> int:
-        if getattr(event, "num", None) == 4:
-            return -3
-        if getattr(event, "num", None) == 5:
-            return 3
+    def _bind_widget_tree(self, widget, sequence: str, callback: Callable) -> None:
+        widget.bind(sequence, callback)
+        for child in widget.winfo_children():
+            self._bind_widget_tree(child, sequence, callback)
 
-        delta = getattr(event, "delta", 0)
-        if delta == 0:
-            return 0
+    def _configure_search_card_tree(self, widget, row_color: str, text_color: str, muted_color: str) -> None:
+        role = getattr(widget, "_kmdr_role", "")
+        try:
+            if role == "card":
+                widget.configure(fg_color=row_color)
+            elif role == "muted":
+                widget.configure(text_color=muted_color)
+            elif role:
+                widget.configure(text_color=text_color)
+        except self._tk.TclError:
+            pass
 
-        steps = abs(delta) // 120
-        if steps < 1:
-            steps = 1
-        return -steps if delta > 0 else steps
-
-    def _on_mousewheel(self, event):
-        units = self._wheel_units(event)
-        if units == 0:
-            return None
-
-        priority_widget = self._find_priority_scroll_widget(event.widget)
-        if priority_widget is not None:
-            priority_widget.yview_scroll(units, "units")
-            return "break"
-
-        canvas = self._find_scroll_canvas(event.widget)
-        if canvas is not None:
-            canvas.yview_scroll(units, "units")
-            return "break"
-
-        return None
-
-    def _on_shift_mousewheel(self, event):
-        units = self._wheel_units(event)
-        if units == 0:
-            return None
-
-        canvas = self._find_scroll_canvas(event.widget)
-        if canvas is not None:
-            canvas.xview_scroll(units, "units")
-            return "break"
-
-        return None
+        for child in widget.winfo_children():
+            self._configure_search_card_tree(child, row_color, text_color, muted_color)
 
     def _build_search_tab(self) -> None:
-        ttk = self._ttk
-        frame = self._frame(self._notebook)
-        self._notebook.add(frame, text="搜索")
+        self._notebook.add("搜索")
+        frame = self._notebook.tab("搜索")
 
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
@@ -911,25 +785,30 @@ class KmdrDesktopApp:
         self._entry(form, textvariable=self._search_page, width=8).grid(row=0, column=3, sticky="w")
         self._button(form, text="搜索", command=self._start_search).grid(row=0, column=4, padx=(10, 0))
 
-        self._search_tree = ttk.Treeview(frame, columns=("name", "author", "status", "url"), show="headings", height=10)
-        self._search_tree.heading("name", text="书名")
-        self._search_tree.heading("author", text="作者")
-        self._search_tree.heading("status", text="状态")
-        self._search_tree.heading("url", text="链接")
-        self._search_tree.column("name", width=280, anchor="w")
-        self._search_tree.column("author", width=160, anchor="w")
-        self._search_tree.column("status", width=90, anchor="w")
-        self._search_tree.column("url", width=360, anchor="w")
-        self._search_tree.grid(row=2, column=0, sticky="nsew", padx=12, pady=(10, 0))
-        self._search_tree.bind("<Double-1>", lambda _event: self._use_selected_search_result())
+        self._search_rows_frame = self._scrollable_frame(frame, height=360)
+        self._search_rows_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=(10, 0))
+        self._search_rows_frame.columnconfigure(0, weight=1)
+        self._search_rows_frame.bind("<Control-c>", lambda _event: self._copy_selected_search_result("row"))
+
+        self._search_result_menu = self._tk.Menu(self._root, tearoff=False)
+        self._search_result_menu.add_command(label="复制书名", command=lambda: self._copy_selected_search_result("name"))
+        self._search_result_menu.add_command(label="复制作者", command=lambda: self._copy_selected_search_result("author"))
+        self._search_result_menu.add_command(label="复制链接", command=lambda: self._copy_selected_search_result("url"))
+        self._search_result_menu.add_command(label="复制整行", command=lambda: self._copy_selected_search_result("row"))
+        self._search_result_menu.add_separator()
+        self._search_result_menu.add_command(label="搜索同作者", command=self._search_selected_author)
 
         actions = self._frame(frame)
         actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 12))
         self._button(actions, text="使用选中链接下载", command=self._use_selected_search_result).grid(row=0, column=0)
+        self._button(actions, text="复制书名", command=lambda: self._copy_selected_search_result("name")).grid(row=0, column=1, padx=(8, 0))
+        self._button(actions, text="复制作者", command=lambda: self._copy_selected_search_result("author")).grid(row=0, column=2, padx=(8, 0))
+        self._button(actions, text="复制链接", command=lambda: self._copy_selected_search_result("url")).grid(row=0, column=3, padx=(8, 0))
+        self._button(actions, text="搜索同作者", command=self._search_selected_author).grid(row=0, column=4, padx=(8, 0))
 
     def _build_account_tab(self) -> None:
-        frame = self._frame(self._notebook)
-        self._notebook.add(frame, text="账户")
+        self._notebook.add("账户")
+        frame = self._notebook.tab("账户")
 
         for idx in range(2):
             frame.columnconfigure(idx, weight=1)
@@ -973,8 +852,8 @@ class KmdrDesktopApp:
         frame.rowconfigure(6, weight=1)
 
     def _build_config_tab(self) -> None:
-        frame = self._frame(self._notebook)
-        self._notebook.add(frame, text="配置")
+        self._notebook.add("配置")
+        frame = self._notebook.tab("配置")
 
         for idx in range(3):
             frame.columnconfigure(idx, weight=1)
@@ -1013,15 +892,15 @@ class KmdrDesktopApp:
             column=column,
             columnspan=columnspan,
             sticky="w",
-            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad if self._ctk is not None else 0 if column == 0 else 8),
-            pady=(12 if self._ctk is not None else 0, 0),
+            padx=(left_pad, right_pad),
+            pady=(12, 0),
         )
         self._entry(parent, textvariable=variable).grid(
             row=row + 1,
             column=column,
             columnspan=columnspan,
             sticky="ew",
-            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad if self._ctk is not None else 0 if column == 0 else 8),
+            padx=(left_pad, right_pad),
             pady=4,
         )
 
@@ -1032,23 +911,20 @@ class KmdrDesktopApp:
             row=row,
             column=column,
             sticky="w",
-            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad),
-            pady=(12 if self._ctk is not None else 0, 0),
+            padx=(left_pad, right_pad),
+            pady=(12, 0),
         )
         self._combobox(parent, textvariable=variable, values=values, state="readonly").grid(
             row=row + 1,
             column=column,
             sticky="ew",
-            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad),
+            padx=(left_pad, right_pad),
             pady=4,
         )
 
     def _apply_font_size(self) -> None:
-        if self._style is None:
-            return
-
         os.environ["KMDR_GUI_FONT_SIZE"] = self._font_size_var.get()
-        self._configure_fonts(self._style)
+        self._configure_fonts()
         self._log_text.configure(font=self._fixed_font)
         self._account_text.configure(font=self._fixed_font)
         self._config_text.configure(font=self._fixed_font)
@@ -1148,26 +1024,223 @@ class KmdrDesktopApp:
         self._start_backend_task("搜索", lambda backend: backend.search(keyword=keyword, page=self._search_page.get()), self._render_search_result)
 
     def _use_selected_search_result(self) -> None:
-        selected = self._search_tree.selection()
+        selected = self._selected_search_item_ids()
         if not selected:
             self._messagebox.showinfo("未选择条目", "请先在搜索结果中选择一本漫画。")
             return
 
         item_id = selected[0]
-        values = self._search_tree.item(item_id, "values")
+        values = self._search_row_values(item_id)
         if len(values) < 4:
             return
 
         self._download_book_url.set(values[3])
-        self._notebook.select(0)
+        self._notebook.set("下载")
         self._parse_download_volumes()
+
+    def _selected_search_item_ids(self) -> list[str]:
+        return sorted(self._selected_search_items, key=lambda item_id: int(item_id))
+
+    def _search_row_values(self, item_id: str) -> tuple[str, str, str, str]:
+        try:
+            book = self._search_results[int(item_id)]
+        except (ValueError, IndexError):
+            return "", "", "", ""
+
+        return (
+            str(book.get("name", "")),
+            str(book.get("author", "")),
+            str(book.get("status", "")),
+            str(book.get("url", "")),
+        )
+
+    def _selected_search_rows(self) -> list[tuple[str, str, str, str]]:
+        return [self._search_row_values(item_id) for item_id in self._selected_search_item_ids()]
+
+    def _show_search_result_menu(self, event):
+        item_id = getattr(event.widget, "_kmdr_item_id", None)
+        if item_id:
+            self._select_search_item(item_id, additive=False)
+
+        if not self._selected_search_items:
+            return "break"
+
+        try:
+            self._search_result_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._search_result_menu.grab_release()
+        return "break"
+
+    def _copy_selected_search_result(self, field: str) -> str:
+        rows = self._selected_search_rows()
+        if not rows:
+            self._messagebox.showinfo("未选择条目", "请先在搜索结果中选择一本漫画。")
+            return "break"
+
+        labels = {
+            "name": "书名",
+            "author": "作者",
+            "status": "状态",
+            "url": "链接",
+            "row": "搜索结果",
+        }
+        column_indexes = {"name": 0, "author": 1, "status": 2, "url": 3}
+
+        if field == "row":
+            text = "\n".join("\t".join(row) for row in rows)
+        else:
+            index = column_indexes.get(field)
+            if index is None:
+                return "break"
+            text = "\n".join(row[index] for row in rows if row[index])
+
+        if not text:
+            self._messagebox.showinfo("没有可复制内容", f"选中结果没有可复制的{labels.get(field, '内容')}。")
+            return "break"
+
+        self._root.clipboard_clear()
+        self._root.clipboard_append(text)
+        self._root.update_idletasks()
+        self._status_var.set(f"已复制{labels.get(field, '内容')}")
+        return "break"
+
+    def _search_selected_author(self) -> None:
+        rows = self._selected_search_rows()
+        if not rows:
+            self._messagebox.showinfo("未选择条目", "请先在搜索结果中选择一本漫画。")
+            return
+
+        author = rows[0][1].strip()
+        if not author:
+            self._messagebox.showinfo("缺少作者", "选中的搜索结果没有作者信息。")
+            return
+
+        self._search_keyword.set(author)
+        self._search_page.set("1")
+        self._start_search()
+
+    def _select_search_item(self, item_id: str, additive: bool = False) -> None:
+        if additive:
+            if item_id in self._selected_search_items:
+                self._selected_search_items.remove(item_id)
+            else:
+                self._selected_search_items.add(item_id)
+        else:
+            self._selected_search_items = {item_id}
+        self._refresh_search_row_styles()
+
+    def _refresh_search_row_styles(self) -> None:
+        for item_id, card in self._search_row_widgets.items():
+            selected = item_id in self._selected_search_items
+            row_color = self._row_color(selected, int(item_id))
+            text_color = "#ffffff" if selected else self._colors["fg"]
+            muted_color = "#dbeafe" if selected else self._colors["muted"]
+            border_color = self._colors["accent"] if selected else self._colors["border"]
+            card.configure(fg_color=row_color, border_color=border_color)
+            self._configure_search_card_tree(card, row_color, text_color, muted_color)
+
+    def _make_search_row(self, item_id: str, values: tuple[str, str, str, str]) -> None:
+        row_index = int(item_id)
+        name, author, status, url = values
+
+        card = self._ctk.CTkFrame(
+            self._search_rows_frame,
+            fg_color=self._row_color(False, row_index),
+            border_width=1,
+            border_color=self._colors["border"],
+            corner_radius=8,
+        )
+        card.grid(row=row_index, column=0, sticky="ew", padx=2, pady=(0, 8))
+        card.columnconfigure(0, weight=1)
+        card._kmdr_item_id = item_id
+        card._kmdr_role = "card"
+
+        title_row = self._frame(card, fg_color="transparent")
+        title_row.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 0))
+        title_row.columnconfigure(0, weight=1)
+        title_row._kmdr_item_id = item_id
+
+        name_label = self._ctk.CTkLabel(
+            title_row,
+            text=name or "未命名漫画",
+            anchor="w",
+            justify="left",
+            font=self._font_tuple(bold=True),
+            text_color=self._colors["fg"],
+            wraplength=760,
+        )
+        name_label.grid(row=0, column=0, sticky="ew")
+        name_label._kmdr_item_id = item_id
+        name_label._kmdr_role = "primary"
+
+        status_label = self._ctk.CTkLabel(
+            title_row,
+            text=status or "状态未知",
+            anchor="e",
+            justify="right",
+            text_color=self._colors["muted"],
+            width=96,
+        )
+        status_label.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        status_label._kmdr_item_id = item_id
+        status_label._kmdr_role = "muted"
+
+        author_label = self._ctk.CTkLabel(
+            card,
+            text=f"作者：{author}" if author else "作者：未知",
+            anchor="w",
+            justify="left",
+            text_color=self._colors["muted"],
+            wraplength=900,
+        )
+        author_label.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 0))
+        author_label._kmdr_item_id = item_id
+        author_label._kmdr_role = "muted"
+
+        url_label = self._ctk.CTkLabel(
+            card,
+            text=url,
+            anchor="w",
+            justify="left",
+            text_color=self._colors["muted"],
+            wraplength=900,
+        )
+        url_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 10))
+        url_label._kmdr_item_id = item_id
+        url_label._kmdr_role = "muted"
+
+        def update_wraplength(_event=None) -> None:
+            body_width = max(260, card.winfo_width() - 32)
+            name_label.configure(wraplength=max(240, body_width - 120))
+            author_label.configure(wraplength=body_width)
+            url_label.configure(wraplength=body_width)
+
+        def click(event) -> str:
+            additive = bool(getattr(event, "state", 0) & 0x0004)
+            self._select_search_item(item_id, additive=additive)
+            card.focus_set()
+            return "break"
+
+        def double_click(_event) -> str:
+            self._select_search_item(item_id, additive=False)
+            self._use_selected_search_result()
+            return "break"
+
+        self._bind_widget_tree(card, "<Button-1>", click)
+        self._bind_widget_tree(card, "<Double-1>", double_click)
+        self._bind_widget_tree(card, "<Button-3>", self._show_search_result_menu)
+        self._bind_widget_tree(card, "<Control-c>", lambda _event: self._copy_selected_search_result("row"))
+        card.bind("<Configure>", update_wraplength, add="+")
+        update_wraplength()
+
+        self._search_row_widgets[item_id] = card
 
     def _start_download(self) -> None:
         options = self._collect_download_options(explain=False)
         if options is None:
             return
 
-        self._download_progress["value"] = 0
+        self._set_progress(0)
         self._start_backend_task("下载", lambda backend: backend.download(options), self._render_download_result)
 
     def _explain_download(self) -> None:
@@ -1175,7 +1248,7 @@ class KmdrDesktopApp:
         if options is None:
             return
 
-        self._download_progress["value"] = 0
+        self._set_progress(0)
         self._start_backend_task("预估下载计划", lambda backend: backend.explain_download(options), self._render_download_result)
 
     def _parse_download_volumes(self) -> None:
@@ -1206,7 +1279,7 @@ class KmdrDesktopApp:
             explain=True,
         )
 
-        self._download_progress["value"] = 0
+        self._set_progress(0)
         self._clear_parsed_volumes()
         self._start_backend_task("解析卷列表", lambda backend: backend.parse_volumes(options), self._render_volume_parse_result)
 
@@ -1247,10 +1320,18 @@ class KmdrDesktopApp:
 
     def _clear_parsed_volumes(self) -> None:
         self._parsed_volumes = []
-        self._volume_tree.delete(*self._volume_tree.get_children())
+        self._selected_volume_items.clear()
+        for cells in self._volume_row_widgets.values():
+            for cell in cells:
+                cell.destroy()
+        self._volume_row_widgets.clear()
 
     def _render_parsed_volumes(self, volumes: list[dict]) -> None:
-        self._volume_tree.delete(*self._volume_tree.get_children())
+        for cells in self._volume_row_widgets.values():
+            for cell in cells:
+                cell.destroy()
+        self._volume_row_widgets.clear()
+        self._selected_volume_items.clear()
 
         for idx, volume in enumerate(volumes):
             size = volume.get("size")
@@ -1259,23 +1340,21 @@ class KmdrDesktopApp:
             else:
                 size_text = ""
 
-            self._volume_tree.insert(
-                "",
-                "end",
-                iid=str(idx),
-                values=(
-                    volume.get("index", ""),
-                    volume.get("type_label") or volume.get("type", ""),
-                    volume.get("name", ""),
-                    volume.get("pages", ""),
+            self._make_volume_row(
+                str(idx),
+                (
+                    str(volume.get("index", "")),
+                    str(volume.get("type_label") or volume.get("type", "")),
+                    str(volume.get("name", "")),
+                    str(volume.get("pages", "")),
                     size_text,
-                    volume.get("extra_info", ""),
+                    str(volume.get("extra_info", "")),
                 ),
             )
 
     def _selected_parsed_volumes(self) -> list[dict]:
         selected = []
-        for item_id in self._volume_tree.selection():
+        for item_id in sorted(self._selected_volume_items, key=lambda value: int(value)):
             try:
                 selected.append(self._parsed_volumes[int(item_id)])
             except (ValueError, IndexError):
@@ -1316,12 +1395,56 @@ class KmdrDesktopApp:
         return True
 
     def _select_all_parsed_volumes(self) -> None:
-        children = self._volume_tree.get_children()
-        if children:
-            self._volume_tree.selection_set(children)
+        self._selected_volume_items = set(self._volume_row_widgets)
+        self._refresh_volume_row_styles()
 
     def _clear_volume_selection(self) -> None:
-        self._volume_tree.selection_remove(self._volume_tree.selection())
+        self._selected_volume_items.clear()
+        self._refresh_volume_row_styles()
+
+    def _select_volume_item(self, item_id: str, additive: bool = True) -> None:
+        if additive:
+            if item_id in self._selected_volume_items:
+                self._selected_volume_items.remove(item_id)
+            else:
+                self._selected_volume_items.add(item_id)
+        else:
+            self._selected_volume_items = {item_id}
+        self._refresh_volume_row_styles()
+
+    def _refresh_volume_row_styles(self) -> None:
+        for item_id, cells in self._volume_row_widgets.items():
+            selected = item_id in self._selected_volume_items
+            row_color = self._row_color(selected, int(item_id))
+            text_color = "#ffffff" if selected else self._colors["fg"]
+            for cell in cells:
+                cell.configure(fg_color=row_color, text_color=text_color)
+
+    def _make_volume_row(self, item_id: str, values: tuple[str, str, str, str, str, str]) -> None:
+        row_index = int(item_id)
+        grid_row = row_index + 1
+        cells = []
+
+        for idx, ((_, weight, _title), value) in enumerate(zip(self._volume_columns, values)):
+            self._volume_rows_frame.columnconfigure(idx, weight=weight, minsize=54)
+            label = self._ctk.CTkLabel(
+                self._volume_rows_frame,
+                text=value,
+                anchor="w",
+                wraplength=360,
+                justify="left",
+                fg_color=self._row_color(False, row_index),
+            )
+            label.grid(row=grid_row, column=idx, sticky="nsew", padx=0, pady=(0, 1), ipady=7)
+            label._kmdr_item_id = item_id
+            cells.append(label)
+
+        def click(event) -> str:
+            self._select_volume_item(item_id, additive=True)
+            return "break"
+
+        self._bind_cells(cells, "<Button-1>", click)
+        self._volume_row_widgets[item_id] = cells
 
     def _set_base_url(self) -> None:
         base_url = self._config_base_url.get().strip()
@@ -1439,7 +1562,7 @@ class KmdrDesktopApp:
         volume = payload.get("volume", "")
         percentage = payload.get("percentage")
         if isinstance(percentage, (int, float)):
-            self._download_progress["value"] = percentage
+            self._set_progress(percentage)
             self._status_var.set(f"下载中 {volume} {percentage}%")
         else:
             self._status_var.set(f"下载状态: {status}")
@@ -1464,21 +1587,23 @@ class KmdrDesktopApp:
         self._render_json_to_text(self._config_text, payload)
 
     def _render_search_result(self, payload: dict) -> None:
-        self._search_tree.delete(*self._search_tree.get_children())
+        for card in self._search_row_widgets.values():
+            card.destroy()
+        self._search_row_widgets.clear()
+        self._selected_search_items.clear()
+
         data = payload.get("data") or {}
         books = data.get("books") or []
         self._search_results = books
 
         for idx, book in enumerate(books):
-            self._search_tree.insert(
-                "",
-                "end",
-                iid=str(idx),
-                values=(
-                    book.get("name", ""),
-                    book.get("author", ""),
-                    book.get("status", ""),
-                    book.get("url", ""),
+            self._make_search_row(
+                str(idx),
+                (
+                    str(book.get("name", "")),
+                    str(book.get("author", "")),
+                    str(book.get("status", "")),
+                    str(book.get("url", "")),
                 ),
             )
 
@@ -1502,7 +1627,7 @@ class KmdrDesktopApp:
         data = payload.get("data") or {}
         if "completed" in data and "total" in data:
             self._status_var.set(f"下载完成: {data.get('completed')}/{data.get('total')}，失败 {data.get('failed', 0)}")
-            self._download_progress["value"] = 100
+            self._set_progress(100)
         elif "to_download" in data:
             self._status_var.set(f"预估完成: 待下载 {len(data.get('to_download') or [])} 卷")
 

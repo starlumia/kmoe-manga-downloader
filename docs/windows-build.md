@@ -12,10 +12,24 @@
 scripts\build_windows.bat
 ```
 
-脚本会在 Windows 本地 `%TEMP%` 下创建隔离的构建虚拟环境，并把 PyInstaller 的临时构建目录放在本地磁盘，避免两个问题：
+脚本会在 Windows 本地创建隔离环境，并把 PyInstaller 的临时构建目录放在本地磁盘，避免两个问题：
 
 - 在 WSL 映射盘里清理 `build` 目录时出现 `PermissionError: [WinError 5] 拒绝访问`
 - `pip install -e .` 触发动态版本号变化，导致 editable wheel 文件名校验失败
+
+构建依赖环境会持久保存在：
+
+```text
+%LOCALAPPDATA%\KmoeMangaDownloader\build-env\pyXY\
+```
+
+其中 `pyXY` 对应当前使用的 Python 版本，例如 `py314`。首次构建、依赖锁文件变化，或显式重建环境时才会安装依赖；普通重复打包会复用这个环境，不再每次下载依赖。
+
+强制重建依赖环境：
+
+```bat
+scripts\build_windows.bat --rebuild-env
+```
 
 脚本会自动按以下顺序选择解释器：
 
