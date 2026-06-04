@@ -6,10 +6,65 @@ import os
 import queue
 import threading
 from collections.abc import Iterable
+from types import ModuleType
 from typing import Callable, Optional
 
 from kmdr.gui_backend import GuiBackend, GuiBackendRunner
 from kmdr.gui_backend import GuiDownloadOptions as DownloadOptions
+
+
+def _load_customtkinter() -> Optional[ModuleType]:
+    try:
+        import customtkinter
+    except ImportError:
+        return None
+
+    return customtkinter
+
+
+def _configure_customtkinter(customtkinter: Optional[ModuleType]) -> None:
+    if customtkinter is None:
+        return
+
+    try:
+        customtkinter.set_appearance_mode(os.environ.get("KMDR_GUI_APPEARANCE", "System"))
+    except ValueError:
+        customtkinter.set_appearance_mode("System")
+
+    try:
+        customtkinter.set_default_color_theme(os.environ.get("KMDR_GUI_COLOR_THEME", "blue"))
+    except ValueError:
+        customtkinter.set_default_color_theme("blue")
+
+
+def _appearance_colors(customtkinter: Optional[ModuleType]) -> dict[str, str]:
+    mode = "Light"
+    if customtkinter is not None:
+        try:
+            mode = customtkinter.get_appearance_mode()
+        except AttributeError:
+            mode = "Light"
+
+    if mode == "Dark":
+        return {
+            "bg": "#242424",
+            "panel": "#2b2b2b",
+            "field": "#343638",
+            "fg": "#dce4ee",
+            "muted": "#a9b1bd",
+            "border": "#3f444a",
+            "accent": "#1f6aa5",
+        }
+
+    return {
+        "bg": "#f5f7fb",
+        "panel": "#ffffff",
+        "field": "#ffffff",
+        "fg": "#1f2937",
+        "muted": "#4b5563",
+        "border": "#d0d7de",
+        "accent": "#1f6aa5",
+    }
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -303,6 +358,8 @@ class KmdrDesktopApp:
 
         self._tk = tk
         self._ttk = ttk
+        self._ctk = _load_customtkinter()
+        _configure_customtkinter(self._ctk)
         self._filedialog = filedialog
         self._messagebox = messagebox
 
@@ -319,6 +376,8 @@ class KmdrDesktopApp:
         self._scroll_canvases = []
         self._wheel_priority_widgets = []
         self._style = None
+        self._uses_custom_root = self._ctk is not None and isinstance(root, self._ctk.CTk)
+        self._colors = _appearance_colors(self._ctk if self._uses_custom_root else None)
 
         self._configure_root()
         self._build_ui()
@@ -326,6 +385,10 @@ class KmdrDesktopApp:
 
     def _configure_root(self) -> None:
         self._root.title("Kmoe Manga Downloader")
+        if self._uses_custom_root:
+            self._root.configure(fg_color=self._colors["bg"])
+        else:
+            self._root.configure(bg=self._colors["bg"])
         self._root.geometry("1180x820")
         self._root.minsize(900, 620)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -382,24 +445,143 @@ class KmdrDesktopApp:
         self._root.option_add("*TCombobox*Listbox.font", self._ui_font)
 
         rowheight = max(34, int(font_size * 2.6))
+        button_padding = (14, 9) if self._ctk is None else (10, 6)
+        primary_padding = (22, 12) if self._ctk is None else (12, 7)
         style.configure(".", font=self._ui_font)
-        style.configure("TLabel", font=self._ui_font)
-        style.configure("TButton", font=self._ui_font, padding=(14, 9))
-        style.configure("Primary.TButton", font=self._heading_font, padding=(22, 12))
+        style.configure("TFrame", background=self._colors["bg"])
+        style.configure("TLabel", font=self._ui_font, background=self._colors["bg"], foreground=self._colors["fg"])
+        style.configure("TButton", font=self._ui_font, padding=button_padding)
+        style.configure("Primary.TButton", font=self._heading_font, padding=primary_padding)
         style.configure("TEntry", font=self._ui_font, padding=(8, 6))
         style.configure("TCombobox", font=self._ui_font, padding=(8, 6))
-        style.configure("TCheckbutton", font=self._ui_font, padding=(6, 6))
+        style.configure("TCheckbutton", font=self._ui_font, padding=(6, 6), background=self._colors["bg"], foreground=self._colors["fg"])
+        style.configure("TLabelframe", background=self._colors["bg"], foreground=self._colors["fg"])
         style.configure("TLabelframe.Label", font=self._heading_font)
-        style.configure("TNotebook.Tab", font=self._ui_font, padding=(18, 11))
-        style.configure("Treeview", font=self._ui_font, rowheight=rowheight)
-        style.configure("Treeview.Heading", font=self._heading_font)
+        style.configure("TNotebook", background=self._colors["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", font=self._ui_font, padding=(18, 11), background=self._colors["panel"], foreground=self._colors["fg"])
+        style.configure(
+            "Treeview",
+            font=self._ui_font,
+            rowheight=rowheight,
+            background=self._colors["field"],
+            fieldbackground=self._colors["field"],
+            foreground=self._colors["fg"],
+            bordercolor=self._colors["border"],
+        )
+        style.configure("Treeview.Heading", font=self._heading_font, background=self._colors["panel"], foreground=self._colors["fg"])
+        style.map("Treeview", background=[("selected", self._colors["accent"])], foreground=[("selected", "#ffffff")])
 
         self._font_size = font_size
+
+    def _font_tuple(self, bold: bool = False, fixed: bool = False) -> tuple:
+        source = self._fixed_font if fixed else self._ui_font
+        family = source.actual("family")
+        size = source.actual("size")
+        if bold:
+            return family, size, "bold"
+        return family, size
+
+    def _frame(self, parent, **kwargs):
+        if self._ctk is not None:
+            kwargs.pop("padding", None)
+            return self._ctk.CTkFrame(parent, fg_color=kwargs.pop("fg_color", "transparent"), **kwargs)
+        return self._ttk.Frame(parent, **kwargs)
+
+    def _label_frame(self, parent, text: str, padding: int = 0):
+        if self._ctk is not None:
+            frame = self._ctk.CTkFrame(parent)
+            if text:
+                label = self._ctk.CTkLabel(frame, text=text, font=self._font_tuple(bold=True), anchor="w")
+                label.grid(row=0, column=0, sticky="ew", padx=padding, pady=(padding, 0))
+                frame._kmdr_content_start_row = 1
+            else:
+                frame._kmdr_content_start_row = 0
+            return frame
+        return self._ttk.LabelFrame(parent, text=text, padding=padding)
+
+    def _content_row(self, parent, row: int) -> int:
+        return row + int(getattr(parent, "_kmdr_content_start_row", 0))
+
+    def _label(self, parent, text: Optional[str] = None, textvariable=None, font=None, **kwargs):
+        if self._ctk is not None:
+            options = dict(kwargs)
+            options.setdefault("anchor", "w")
+            if font is not None:
+                options["font"] = font if isinstance(font, tuple) else self._font_tuple(bold=font is self._heading_font)
+            if textvariable is not None:
+                return self._ctk.CTkLabel(parent, textvariable=textvariable, **options)
+            return self._ctk.CTkLabel(parent, text=text or "", **options)
+
+        if textvariable is not None:
+            return self._ttk.Label(parent, textvariable=textvariable, font=font, **kwargs)
+        return self._ttk.Label(parent, text=text or "", font=font, **kwargs)
+
+    def _button(self, parent, text: str, command: Callable, style: Optional[str] = None, state: str = "normal", **kwargs):
+        if self._ctk is not None:
+            options = dict(kwargs)
+            options.pop("style", None)
+            height = 38 if style == "Primary.TButton" else 34
+            font = self._font_tuple(bold=style == "Primary.TButton")
+            return self._ctk.CTkButton(parent, text=text, command=command, state=state, height=height, font=font, **options)
+        return self._ttk.Button(parent, text=text, command=command, style=style, state=state, **kwargs)
+
+    def _entry(self, parent, textvariable, show: Optional[str] = None, width: Optional[int] = None, **kwargs):
+        if self._ctk is not None:
+            options = dict(kwargs)
+            if width is not None:
+                options["width"] = max(80, width * 12)
+            if show is not None:
+                options["show"] = show
+            return self._ctk.CTkEntry(parent, textvariable=textvariable, font=self._font_tuple(), height=34, **options)
+
+        options = dict(kwargs)
+        if width is not None:
+            options["width"] = width
+        if show is not None:
+            options["show"] = show
+        return self._ttk.Entry(parent, textvariable=textvariable, **options)
+
+    def _combobox(self, parent, textvariable, values: tuple[str, ...], state: str = "readonly", width: Optional[int] = None):
+        if self._ctk is not None:
+            ctk_state = "readonly" if state == "readonly" else state
+            combo_width = 120 if width is None else max(90, width * 12)
+            return self._ctk.CTkComboBox(
+                parent,
+                variable=textvariable,
+                values=list(values),
+                state=ctk_state,
+                width=combo_width,
+                height=34,
+                font=self._font_tuple(),
+            )
+        options = {"textvariable": textvariable, "values": values, "state": state}
+        if width is not None:
+            options["width"] = width
+        return self._ttk.Combobox(parent, **options)
+
+    def _checkbutton(self, parent, text: str, variable, command: Optional[Callable] = None):
+        if self._ctk is not None:
+            return self._ctk.CTkCheckBox(parent, text=text, variable=variable, command=command, font=self._font_tuple())
+        return self._ttk.Checkbutton(parent, text=text, variable=variable, command=command)
+
+    def _textbox(self, parent, height: int, state: str):
+        return self._tk.Text(
+            parent,
+            height=height,
+            wrap="word",
+            state=state,
+            font=self._fixed_font,
+            background=self._colors["field"],
+            foreground=self._colors["fg"],
+            insertbackground=self._colors["fg"],
+            relief="flat",
+            borderwidth=1,
+        )
 
     def _build_ui(self) -> None:
         ttk = self._ttk
 
-        main = ttk.Frame(self._root, padding=10)
+        main = self._frame(self._root)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
@@ -420,16 +602,16 @@ class KmdrDesktopApp:
         self._root.bind_all("<Shift-Button-4>", self._on_shift_mousewheel, add="+")
         self._root.bind_all("<Shift-Button-5>", self._on_shift_mousewheel, add="+")
 
-        controls = ttk.Frame(main)
+        controls = self._frame(main)
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 8))
         controls.columnconfigure(0, weight=1)
 
         self._status_var = self._tk.StringVar(value="就绪")
-        ttk.Label(controls, textvariable=self._status_var).grid(row=0, column=0, sticky="w")
+        self._label(controls, textvariable=self._status_var).grid(row=0, column=0, sticky="w")
 
-        ttk.Label(controls, text="界面字号").grid(row=0, column=1, sticky="e", padx=(8, 6))
+        self._label(controls, text="界面字号").grid(row=0, column=1, sticky="e", padx=(8, 6))
         self._font_size_var = self._tk.StringVar(value=str(self._font_size))
-        font_size_box = ttk.Combobox(
+        font_size_box = self._combobox(
             controls,
             textvariable=self._font_size_var,
             values=("10", "12", "14", "16", "18", "20", "22"),
@@ -437,9 +619,12 @@ class KmdrDesktopApp:
             state="readonly",
         )
         font_size_box.grid(row=0, column=2, sticky="e", padx=(0, 8))
-        font_size_box.bind("<<ComboboxSelected>>", lambda _event: self._apply_font_size())
+        if self._ctk is not None:
+            font_size_box.configure(command=lambda _value: self._apply_font_size())
+        else:
+            font_size_box.bind("<<ComboboxSelected>>", lambda _event: self._apply_font_size())
 
-        self._global_download_button = ttk.Button(
+        self._global_download_button = self._button(
             controls,
             text="DOWNLOAD / 开始下载",
             command=self._start_download,
@@ -447,18 +632,24 @@ class KmdrDesktopApp:
         )
         self._global_download_button.grid(row=0, column=3, sticky="e", padx=(0, 8))
 
-        self._stop_button = ttk.Button(controls, text="停止当前任务", command=self._stop_current_process, state="disabled")
+        self._stop_button = self._button(controls, text="停止当前任务", command=self._stop_current_process, state="disabled")
         self._stop_button.grid(row=0, column=4, sticky="e")
 
-        log_frame = ttk.LabelFrame(main, text="运行日志", padding=8)
+        log_frame = self._label_frame(main, text="运行日志", padding=8)
         log_frame.grid(row=2, column=0, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
+        log_frame.rowconfigure(self._content_row(log_frame, 0), weight=1)
 
-        self._log_text = self._tk.Text(log_frame, height=8, wrap="word", state="disabled", font=self._fixed_font)
-        self._log_text.grid(row=0, column=0, sticky="nsew")
+        self._log_text = self._textbox(log_frame, height=8, state="disabled")
+        self._log_text.grid(
+            row=self._content_row(log_frame, 0),
+            column=0,
+            sticky="nsew",
+            padx=8 if self._ctk is not None else 0,
+            pady=8 if self._ctk is not None else 0,
+        )
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self._log_text.yview)
-        log_scroll.grid(row=0, column=1, sticky="ns")
+        log_scroll.grid(row=self._content_row(log_frame, 0), column=1, sticky="ns", pady=8 if self._ctk is not None else 0)
         self._log_text.configure(yscrollcommand=log_scroll.set)
         self._migrate_legacy_login_secret()
         self._load_initial_backend_config()
@@ -471,11 +662,11 @@ class KmdrDesktopApp:
             frame.columnconfigure(idx, weight=1)
         frame.rowconfigure(16, weight=1)
 
-        header = ttk.Frame(frame)
+        header = self._frame(frame)
         header.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 12))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="下载任务", font=self._heading_font).grid(row=0, column=0, sticky="w")
-        ttk.Button(header, text="DOWNLOAD / 开始下载", command=self._start_download, style="Primary.TButton").grid(row=0, column=1, sticky="e")
+        self._label(header, text="下载任务", font=self._heading_font).grid(row=0, column=0, sticky="w")
+        self._button(header, text="DOWNLOAD / 开始下载", command=self._start_download, style="Primary.TButton").grid(row=0, column=1, sticky="e")
 
         self._download_book_url = self._tk.StringVar()
         self._download_dest = self._tk.StringVar(value=_default_download_dest())
@@ -498,7 +689,7 @@ class KmdrDesktopApp:
 
         self._add_labeled_entry(frame, "漫画详情 URL", self._download_book_url, 1, 0, columnspan=4)
         self._add_labeled_entry(frame, "保存目录", self._download_dest, 3, 0, columnspan=3)
-        ttk.Button(frame, text="选择目录", command=self._choose_download_dest).grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
+        self._button(frame, text="选择目录", command=self._choose_download_dest).grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         self._add_labeled_entry(frame, "卷选择", self._download_volume, 5, 0)
         self._add_labeled_combobox(frame, "卷类型", self._download_vol_type, 5, 1, values=("vol", "extra", "seri", "all"))
@@ -514,41 +705,48 @@ class KmdrDesktopApp:
         self._add_labeled_entry(frame, "每账号并发比例", self._download_per_cred_ratio, 9, 2)
         self._add_labeled_entry(frame, "完成回调", self._download_callback, 11, 0, columnspan=4)
 
-        flags = ttk.Frame(frame)
+        flags = self._frame(frame)
         flags.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(8, 4))
         for idx in range(5):
             flags.columnconfigure(idx, weight=1)
 
-        ttk.Checkbutton(flags, text="启用凭证池", variable=self._download_use_pool).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(flags, text="使用 VIP 链接", variable=self._download_vip).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(flags, text="尝试分片", variable=self._download_try_multi_part).grid(row=0, column=2, sticky="w")
-        ttk.Checkbutton(flags, text="禁用分片", variable=self._download_disable_multi_part).grid(row=0, column=3, sticky="w")
-        ttk.Checkbutton(flags, text="随机 UA", variable=self._download_fake_ua).grid(row=0, column=4, sticky="w")
+        self._checkbutton(flags, text="启用凭证池", variable=self._download_use_pool).grid(row=0, column=0, sticky="w")
+        self._checkbutton(flags, text="使用 VIP 链接", variable=self._download_vip).grid(row=0, column=1, sticky="w")
+        self._checkbutton(flags, text="尝试分片", variable=self._download_try_multi_part).grid(row=0, column=2, sticky="w")
+        self._checkbutton(flags, text="禁用分片", variable=self._download_disable_multi_part).grid(row=0, column=3, sticky="w")
+        self._checkbutton(flags, text="随机 UA", variable=self._download_fake_ua).grid(row=0, column=4, sticky="w")
 
-        actions = ttk.Frame(frame)
+        actions = self._frame(frame)
         actions.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         actions.columnconfigure(2, weight=1)
-        ttk.Button(actions, text="预估下载计划", command=self._explain_download).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(actions, text="DOWNLOAD / 开始下载", command=self._start_download, style="Primary.TButton").grid(row=0, column=1)
+        self._button(actions, text="预估下载计划", command=self._explain_download).grid(row=0, column=0, padx=(0, 8))
+        self._button(actions, text="DOWNLOAD / 开始下载", command=self._start_download, style="Primary.TButton").grid(row=0, column=1)
 
-        progress_frame = ttk.Frame(frame)
+        progress_frame = self._frame(frame)
         progress_frame.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         progress_frame.columnconfigure(0, weight=1)
         self._download_progress = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
         self._download_progress.grid(row=0, column=0, sticky="ew")
 
-        volume_frame = ttk.LabelFrame(frame, text="已解析卷列表", padding=8)
+        volume_frame = self._label_frame(frame, text="已解析卷列表", padding=8)
         volume_frame.grid(row=16, column=0, columnspan=4, sticky="nsew", pady=(14, 0))
         volume_frame.columnconfigure(0, weight=1)
-        volume_frame.rowconfigure(1, weight=1)
+        volume_frame.rowconfigure(self._content_row(volume_frame, 1), weight=1)
 
-        volume_actions = ttk.Frame(volume_frame)
-        volume_actions.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        volume_actions = self._frame(volume_frame)
+        volume_actions.grid(
+            row=self._content_row(volume_frame, 0),
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8 if self._ctk is not None else 0,
+            pady=(8 if self._ctk is not None else 0, 8),
+        )
         volume_actions.columnconfigure(4, weight=1)
-        ttk.Button(volume_actions, text="解析卷列表", command=self._parse_download_volumes).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(volume_actions, text="应用选中卷", command=self._apply_selected_volumes).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(volume_actions, text="全选", command=self._select_all_parsed_volumes).grid(row=0, column=2, padx=(0, 8))
-        ttk.Button(volume_actions, text="清空选择", command=self._clear_volume_selection).grid(row=0, column=3, padx=(0, 8))
+        self._button(volume_actions, text="解析卷列表", command=self._parse_download_volumes).grid(row=0, column=0, padx=(0, 8))
+        self._button(volume_actions, text="应用选中卷", command=self._apply_selected_volumes).grid(row=0, column=1, padx=(0, 8))
+        self._button(volume_actions, text="全选", command=self._select_all_parsed_volumes).grid(row=0, column=2, padx=(0, 8))
+        self._button(volume_actions, text="清空选择", command=self._clear_volume_selection).grid(row=0, column=3, padx=(0, 8))
 
         self._volume_tree = ttk.Treeview(
             volume_frame,
@@ -569,10 +767,22 @@ class KmdrDesktopApp:
         self._volume_tree.column("pages", width=80, anchor="e")
         self._volume_tree.column("size", width=90, anchor="e")
         self._volume_tree.column("extra", width=150, anchor="w")
-        self._volume_tree.grid(row=1, column=0, sticky="nsew")
+        self._volume_tree.grid(
+            row=self._content_row(volume_frame, 1),
+            column=0,
+            sticky="nsew",
+            padx=(8, 0) if self._ctk is not None else 0,
+            pady=(0, 8) if self._ctk is not None else 0,
+        )
 
         volume_scroll = ttk.Scrollbar(volume_frame, orient="vertical", command=self._volume_tree.yview)
-        volume_scroll.grid(row=1, column=1, sticky="ns")
+        volume_scroll.grid(
+            row=self._content_row(volume_frame, 1),
+            column=1,
+            sticky="ns",
+            padx=(0, 8) if self._ctk is not None else 0,
+            pady=(0, 8) if self._ctk is not None else 0,
+        )
         self._volume_tree.configure(yscrollcommand=volume_scroll.set)
         self._wheel_priority_widgets.append(self._volume_tree)
 
@@ -583,7 +793,7 @@ class KmdrDesktopApp:
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(0, weight=1)
 
-        canvas = self._tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        canvas = self._tk.Canvas(outer, highlightthickness=0, borderwidth=0, background=self._colors["bg"])
         vertical_scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         horizontal_scroll = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
         canvas.configure(yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set)
@@ -592,7 +802,7 @@ class KmdrDesktopApp:
         vertical_scroll.grid(row=0, column=1, sticky="ns")
         horizontal_scroll.grid(row=1, column=0, sticky="ew")
 
-        frame = ttk.Frame(canvas, padding=12)
+        frame = self._frame(canvas)
         window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
 
         def update_scroll_region(_event=None) -> None:
@@ -682,7 +892,7 @@ class KmdrDesktopApp:
 
     def _build_search_tab(self) -> None:
         ttk = self._ttk
-        frame = ttk.Frame(self._notebook, padding=12)
+        frame = self._frame(self._notebook)
         self._notebook.add(frame, text="搜索")
 
         frame.columnconfigure(0, weight=1)
@@ -691,15 +901,15 @@ class KmdrDesktopApp:
         self._search_keyword = self._tk.StringVar()
         self._search_page = self._tk.StringVar(value="1")
 
-        form = ttk.Frame(frame)
-        form.grid(row=0, column=0, sticky="ew")
+        form = self._frame(frame)
+        form.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="关键词").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Entry(form, textvariable=self._search_keyword).grid(row=0, column=1, sticky="ew")
-        ttk.Label(form, text="页码").grid(row=0, column=2, sticky="w", padx=(10, 8))
-        ttk.Entry(form, textvariable=self._search_page, width=8).grid(row=0, column=3, sticky="w")
-        ttk.Button(form, text="搜索", command=self._start_search).grid(row=0, column=4, padx=(10, 0))
+        self._label(form, text="关键词").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._entry(form, textvariable=self._search_keyword).grid(row=0, column=1, sticky="ew")
+        self._label(form, text="页码").grid(row=0, column=2, sticky="w", padx=(10, 8))
+        self._entry(form, textvariable=self._search_page, width=8).grid(row=0, column=3, sticky="w")
+        self._button(form, text="搜索", command=self._start_search).grid(row=0, column=4, padx=(10, 0))
 
         self._search_tree = ttk.Treeview(frame, columns=("name", "author", "status", "url"), show="headings", height=10)
         self._search_tree.heading("name", text="书名")
@@ -710,16 +920,15 @@ class KmdrDesktopApp:
         self._search_tree.column("author", width=160, anchor="w")
         self._search_tree.column("status", width=90, anchor="w")
         self._search_tree.column("url", width=360, anchor="w")
-        self._search_tree.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        self._search_tree.grid(row=2, column=0, sticky="nsew", padx=12, pady=(10, 0))
         self._search_tree.bind("<Double-1>", lambda _event: self._use_selected_search_result())
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="使用选中链接下载", command=self._use_selected_search_result).grid(row=0, column=0)
+        actions = self._frame(frame)
+        actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 12))
+        self._button(actions, text="使用选中链接下载", command=self._use_selected_search_result).grid(row=0, column=0)
 
     def _build_account_tab(self) -> None:
-        ttk = self._ttk
-        frame = ttk.Frame(self._notebook, padding=12)
+        frame = self._frame(self._notebook)
         self._notebook.add(frame, text="账户")
 
         for idx in range(2):
@@ -737,35 +946,34 @@ class KmdrDesktopApp:
 
         self._add_labeled_entry(frame, "用户名", self._login_username, 0, 0)
 
-        ttk.Label(frame, text="密码").grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Entry(frame, textvariable=self._login_password, show="*").grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
+        self._label(frame, text="密码").grid(row=0, column=1, sticky="w", padx=(8, 12), pady=(12, 0))
+        self._entry(frame, textvariable=self._login_password, show="*").grid(row=1, column=1, sticky="ew", padx=(8, 12), pady=4)
 
-        ttk.Checkbutton(
+        self._checkbutton(
             frame,
             text="记住账号密码（加密保存）",
             variable=self._remember_login,
             command=self._on_remember_login_changed,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 4))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 4))
 
         self._add_labeled_entry(frame, "状态检查代理", self._status_proxy, 3, 0, columnspan=2)
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="登录并保存 Cookie", command=self._start_login).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(actions, text="查看账户状态", command=self._start_status).grid(row=0, column=1)
-        ttk.Button(actions, text="清除已保存账号", command=lambda: self._forget_saved_login(show_message=True, clear_fields=True)).grid(
+        actions = self._frame(frame)
+        actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 0))
+        self._button(actions, text="登录并保存 Cookie", command=self._start_login).grid(row=0, column=0, padx=(0, 8))
+        self._button(actions, text="查看账户状态", command=self._start_status).grid(row=0, column=1)
+        self._button(actions, text="清除已保存账号", command=lambda: self._forget_saved_login(show_message=True, clear_fields=True)).grid(
             row=0,
             column=2,
             padx=(8, 0),
         )
 
-        self._account_text = self._tk.Text(frame, height=12, wrap="word", state="disabled", font=self._fixed_font)
-        self._account_text.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        self._account_text = self._textbox(frame, height=12, state="disabled")
+        self._account_text.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=12, pady=(12, 12))
         frame.rowconfigure(6, weight=1)
 
     def _build_config_tab(self) -> None:
-        ttk = self._ttk
-        frame = ttk.Frame(self._notebook, padding=12)
+        frame = self._frame(self._notebook)
         self._notebook.add(frame, text="配置")
 
         for idx in range(3):
@@ -779,44 +987,59 @@ class KmdrDesktopApp:
         self._config_format = self._tk.StringVar()
 
         self._add_labeled_entry(frame, "镜像站基础 URL", self._config_base_url, 0, 0, columnspan=2)
-        ttk.Button(frame, text="保存镜像站", command=self._set_base_url).grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=4)
+        self._button(frame, text="保存镜像站", command=self._set_base_url).grid(row=1, column=2, sticky="ew", padx=(8, 12), pady=4)
 
         self._add_labeled_entry(frame, "默认保存目录", self._config_dest, 2, 0, columnspan=2)
-        ttk.Button(frame, text="选择目录", command=self._choose_config_dest).grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=4)
+        self._button(frame, text="选择目录", command=self._choose_config_dest).grid(row=3, column=2, sticky="ew", padx=(8, 12), pady=4)
         self._add_labeled_entry(frame, "默认代理", self._config_proxy, 4, 0)
         self._add_labeled_entry(frame, "默认并发数", self._config_workers, 4, 1)
         self._add_labeled_entry(frame, "默认重试次数", self._config_retry, 4, 2)
         self._add_labeled_combobox(frame, "默认格式", self._config_format, 6, 0, values=("", "epub", "mobi"))
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="保存下载默认项", command=self._set_download_defaults).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(actions, text="查看当前配置", command=self._list_config).grid(row=0, column=1)
+        actions = self._frame(frame)
+        actions.grid(row=8, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 0))
+        self._button(actions, text="保存下载默认项", command=self._set_download_defaults).grid(row=0, column=0, padx=(0, 8))
+        self._button(actions, text="查看当前配置", command=self._list_config).grid(row=0, column=1)
 
-        self._config_text = self._tk.Text(frame, height=12, wrap="word", state="disabled", font=self._fixed_font)
-        self._config_text.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(12, 0))
+        self._config_text = self._textbox(frame, height=12, state="disabled")
+        self._config_text.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=12, pady=(12, 12))
         frame.rowconfigure(9, weight=1)
 
     def _add_labeled_entry(self, parent, label: str, variable, row: int, column: int, columnspan: int = 1) -> None:
-        ttk = self._ttk
-        ttk.Label(parent, text=label).grid(row=row, column=column, columnspan=columnspan, sticky="w", padx=(0, 0 if column == 0 else 8))
-        ttk.Entry(parent, textvariable=variable).grid(
+        left_pad = 12 if column == 0 else 8
+        right_pad = 12 if column + columnspan >= 3 else 0
+        self._label(parent, text=label).grid(
+            row=row,
+            column=column,
+            columnspan=columnspan,
+            sticky="w",
+            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad if self._ctk is not None else 0 if column == 0 else 8),
+            pady=(12 if self._ctk is not None else 0, 0),
+        )
+        self._entry(parent, textvariable=variable).grid(
             row=row + 1,
             column=column,
             columnspan=columnspan,
             sticky="ew",
-            padx=(0, 0 if column == 0 else 8),
+            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad if self._ctk is not None else 0 if column == 0 else 8),
             pady=4,
         )
 
     def _add_labeled_combobox(self, parent, label: str, variable, row: int, column: int, values: tuple[str, ...]) -> None:
-        ttk = self._ttk
-        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=(0 if column == 0 else 8, 0))
-        ttk.Combobox(parent, textvariable=variable, values=values, state="readonly").grid(
+        left_pad = 12 if column == 0 else 8
+        right_pad = 12 if column >= 3 else 0
+        self._label(parent, text=label).grid(
+            row=row,
+            column=column,
+            sticky="w",
+            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad),
+            pady=(12 if self._ctk is not None else 0, 0),
+        )
+        self._combobox(parent, textvariable=variable, values=values, state="readonly").grid(
             row=row + 1,
             column=column,
             sticky="ew",
-            padx=(0 if column == 0 else 8, 0),
+            padx=(left_pad if self._ctk is not None else 0 if column == 0 else 8, right_pad),
             pady=4,
         )
 
@@ -1323,7 +1546,9 @@ def entry_point() -> None:
     except ImportError as exc:
         raise RuntimeError("无法启动图形界面：当前 Python 未安装 Tkinter。") from exc
 
-    root = tk.Tk()
+    customtkinter = _load_customtkinter()
+    _configure_customtkinter(customtkinter)
+    root = customtkinter.CTk() if customtkinter is not None else tk.Tk()
     KmdrDesktopApp(root)
     root.mainloop()
 

@@ -3,6 +3,8 @@
 from pathlib import Path
 import sys
 
+from PyInstaller.utils.hooks import collect_data_files
+
 
 project_root = Path.cwd()
 src_path = str(project_root / "src")
@@ -10,7 +12,7 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 hiddenimports = []
-common_datas = []
+common_datas = collect_data_files("customtkinter")
 
 gui = Analysis(
     ["src/kmdr/windows_gui.py"],

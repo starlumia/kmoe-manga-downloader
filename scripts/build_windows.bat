@@ -71,7 +71,7 @@ if not exist "%BUILD_PYTHON%" (
     exit /b 1
 )
 
-"%BUILD_PYTHON%" -m pip install "aiofiles~=24.1.0" "aiohttp~=3.12.15" "beautifulsoup4~=4.13.4" "rich~=13.9.4" "typing-extensions~=4.15.0" "yarl~=1.20.1" "pyinstaller"
+"%BUILD_PYTHON%" -m pip install "aiofiles~=24.1.0" "aiohttp~=3.12.15" "beautifulsoup4~=4.13.4" "customtkinter~=5.2.2" "rich~=13.9.4" "typing-extensions~=4.15.0" "yarl~=1.20.1" "pyinstaller"
 if errorlevel 1 (
     echo Failed to install build dependencies.
     popd
