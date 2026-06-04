@@ -22,7 +22,7 @@ class LoginAuthenticator(Authenticator):
         *args,
         **kwargs,
     ):
-        super().__init__(auto_save=auto_save, *args, **kwargs)
+        super().__init__(*args, auto_save=auto_save, **kwargs)
         self._username = username
         self._show_quota = show_quota
 
@@ -36,9 +36,16 @@ class LoginAuthenticator(Authenticator):
     async def _authenticate(self) -> Credential:
         from .utils import check_status
 
+        async with self._session.get(url=API_ROUTE.LOGIN) as response:
+            response.raise_for_status()
+            cookies = extract_cookies(response)
+            login_url = str(response.url)
+
         async with self._session.post(
             url=API_ROUTE.LOGIN_DO,
             data={"email": self._username, "passwd": self._password, "keepalive": "on"},
+            cookies=cookies,
+            headers={"Referer": login_url},
         ) as response:
             response.raise_for_status()
 
@@ -53,7 +60,12 @@ class LoginAuthenticator(Authenticator):
             if not LoginResponse.ok(login_response):
                 raise LoginError(f"认证失败，错误代码：{login_response.name} {login_response.value}")
 
-            cookies = extract_cookies(response)
+            cookies = {**cookies, **extract_cookies(response)}
+            if not cookies:
+                raise LoginError(
+                    "登录接口返回成功，但没有收到会话 Cookie。当前镜像可能拦截了非浏览器登录请求。",
+                    ["在配置页切换镜像站后重新登录", "启用随机 UA 后重试"],
+                )
 
             cred: Credential = await check_status(
                 self._session,
