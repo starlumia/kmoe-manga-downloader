@@ -56,4 +56,3 @@ jobs:
           files: |
             Kmoe-Manga-Downloader.exe
             Kmoe-Manga-Downloader-Windows.zip
-            dist/Kmoe Manga Downloader/kmdr-cli.exe
