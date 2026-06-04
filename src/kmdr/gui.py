@@ -385,6 +385,9 @@ class KmdrDesktopApp:
         self._selected_search_items: set[str] = set()
         self._volume_row_widgets: dict[str, object] = {}
         self._selected_volume_items: set[str] = set()
+        self._pages: dict[str, object] = {}
+        self._nav_buttons: dict[str, object] = {}
+        self._active_page = ""
         self._colors = _appearance_colors(self._ctk)
 
         self._configure_root()
@@ -406,7 +409,7 @@ class KmdrDesktopApp:
     def _configure_fonts(self) -> None:
         from tkinter import font
 
-        font_size = _get_env_int("KMDR_GUI_FONT_SIZE", 16)
+        font_size = _get_env_int("KMDR_GUI_FONT_SIZE", 18)
         scaling = _get_env_float("KMDR_GUI_SCALE", 1.7)
         preferred_family = _get_preferred_font_family(set(font.families(self._root)))
         font_config = {"size": font_size}
@@ -539,12 +542,32 @@ class KmdrDesktopApp:
     def _build_ui(self) -> None:
         main = self._frame(self._root)
         main.grid(row=0, column=0, sticky="nsew")
-        main.columnconfigure(0, weight=1)
-        main.rowconfigure(0, weight=1)
-        main.rowconfigure(2, weight=1)
+        self._main = main
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=3)
+        main.rowconfigure(2, weight=2)
+        main.rowconfigure(3, weight=1)
 
-        self._notebook = self._ctk.CTkTabview(main)
-        self._notebook.grid(row=0, column=0, sticky="nsew")
+        self._nav_frame = self._ctk.CTkFrame(main, fg_color=self._colors["panel"], width=148, corner_radius=0)
+        self._nav_frame.grid(row=0, column=0, rowspan=4, sticky="nsw")
+        self._nav_frame.grid_propagate(False)
+        self._nav_frame.columnconfigure(0, weight=1)
+
+        workspace = self._frame(main)
+        workspace.grid(row=0, column=1, sticky="nsew")
+        workspace.columnconfigure(0, weight=1)
+        workspace.rowconfigure(0, weight=1)
+        self._workspace = workspace
+
+        self._page_container = self._frame(workspace)
+        self._page_container.grid(row=0, column=0, sticky="nsew")
+        self._page_container.columnconfigure(0, weight=1)
+        self._page_container.rowconfigure(0, weight=1)
+
+        self._build_nav_button("下载", 0)
+        self._build_nav_button("搜索", 1)
+        self._build_nav_button("账户", 2)
+        self._build_nav_button("配置", 3)
 
         self._build_download_tab()
         self._build_search_tab()
@@ -552,7 +575,7 @@ class KmdrDesktopApp:
         self._build_config_tab()
 
         controls = self._frame(main)
-        controls.grid(row=1, column=0, sticky="ew", pady=(8, 8))
+        controls.grid(row=1, column=1, sticky="ew", pady=(8, 8))
         controls.columnconfigure(0, weight=1)
 
         self._status_var = self._tk.StringVar(value="就绪")
@@ -563,7 +586,7 @@ class KmdrDesktopApp:
         font_size_box = self._combobox(
             controls,
             textvariable=self._font_size_var,
-            values=("10", "12", "14", "16", "18", "20", "22"),
+            values=("14", "16", "18", "20", "22", "24", "26"),
             width=6,
             state="readonly",
         )
@@ -581,12 +604,14 @@ class KmdrDesktopApp:
         self._stop_button = self._button(controls, text="停止当前任务", command=self._stop_current_process, state="disabled")
         self._stop_button.grid(row=0, column=4, sticky="e")
 
+        self._build_volume_panel(main)
+
         log_frame = self._label_frame(main, text="运行日志", padding=8)
-        log_frame.grid(row=2, column=0, sticky="nsew")
+        log_frame.grid(row=3, column=1, sticky="nsew", pady=(8, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(self._content_row(log_frame, 0), weight=1)
 
-        self._log_text = self._textbox(log_frame, height=8, state="disabled")
+        self._log_text = self._textbox(log_frame, height=10, state="disabled")
         self._log_text.grid(
             row=self._content_row(log_frame, 0),
             column=0,
@@ -594,8 +619,62 @@ class KmdrDesktopApp:
             padx=8,
             pady=8,
         )
+        self._show_page("下载")
         self._migrate_legacy_login_secret()
         self._load_initial_backend_config()
+
+    def _build_nav_button(self, title: str, row: int) -> None:
+        button = self._ctk.CTkButton(
+            self._nav_frame,
+            text=title,
+            command=lambda page=title: self._show_page(page),
+            anchor="w",
+            height=42,
+            font=self._font_tuple(bold=True),
+            fg_color="transparent",
+            text_color=self._colors["fg"],
+            hover_color=self._colors["row_alt"],
+        )
+        button.grid(row=row, column=0, sticky="ew", padx=10, pady=(10 if row == 0 else 0, 8))
+        self._nav_buttons[title] = button
+
+    def _make_page(self, title: str):
+        page = self._frame(self._page_container)
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_remove()
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+        self._pages[title] = page
+        return page
+
+    def _show_page(self, title: str) -> None:
+        for page_title, page in self._pages.items():
+            if page_title == title:
+                page.grid()
+            else:
+                page.grid_remove()
+
+        volume_frame = getattr(self, "_volume_frame", None)
+        if title == "下载":
+            self._workspace.grid(row=0, column=1, sticky="nsew")
+            self._main.rowconfigure(0, weight=3)
+            self._main.rowconfigure(2, weight=2)
+            if volume_frame is not None:
+                volume_frame.grid()
+        else:
+            self._workspace.grid(row=0, column=1, sticky="nsew")
+            self._main.rowconfigure(0, weight=5)
+            self._main.rowconfigure(2, weight=0)
+            if volume_frame is not None:
+                volume_frame.grid_remove()
+        self._main.rowconfigure(3, weight=1)
+
+        self._active_page = title
+        for page_title, button in self._nav_buttons.items():
+            if page_title == title:
+                button.configure(fg_color=self._colors["accent"], text_color="#ffffff", hover_color=self._colors["accent"])
+            else:
+                button.configure(fg_color="transparent", text_color=self._colors["fg"], hover_color=self._colors["row_alt"])
 
     def _build_download_tab(self) -> None:
         frame = self._add_scrollable_tab("下载")
@@ -670,14 +749,15 @@ class KmdrDesktopApp:
         self._download_progress = self._progressbar(progress_frame)
         self._download_progress.grid(row=0, column=0, sticky="ew")
 
-        volume_frame = self._label_frame(frame, text="已解析卷列表", padding=8)
-        volume_frame.grid(row=16, column=0, columnspan=4, sticky="nsew", pady=(14, 0))
-        volume_frame.columnconfigure(0, weight=1)
-        volume_frame.rowconfigure(self._content_row(volume_frame, 1), weight=1)
+    def _build_volume_panel(self, parent) -> None:
+        self._volume_frame = self._label_frame(parent, text="已解析卷列表", padding=8)
+        self._volume_frame.grid(row=2, column=1, sticky="nsew")
+        self._volume_frame.columnconfigure(0, weight=1)
+        self._volume_frame.rowconfigure(self._content_row(self._volume_frame, 1), weight=1)
 
-        volume_actions = self._frame(volume_frame)
+        volume_actions = self._frame(self._volume_frame)
         volume_actions.grid(
-            row=self._content_row(volume_frame, 0),
+            row=self._content_row(self._volume_frame, 0),
             column=0,
             sticky="ew",
             padx=8,
@@ -689,24 +769,25 @@ class KmdrDesktopApp:
         self._button(volume_actions, text="全选", command=self._select_all_parsed_volumes).grid(row=0, column=2, padx=(0, 8))
         self._button(volume_actions, text="清空选择", command=self._clear_volume_selection).grid(row=0, column=3, padx=(0, 8))
 
-        self._volume_table = self._frame(volume_frame, fg_color=self._colors["field"])
+        self._volume_table = self._frame(self._volume_frame, fg_color=self._colors["field"])
         self._volume_table.grid(
-            row=self._content_row(volume_frame, 1),
+            row=self._content_row(self._volume_frame, 1),
             column=0,
             sticky="nsew",
             padx=8,
             pady=(0, 8),
         )
         self._volume_table.columnconfigure(0, weight=1)
+        self._volume_table.rowconfigure(1, weight=1)
 
-        self._volume_rows_frame = self._scrollable_frame(self._volume_table, height=320)
-        self._volume_rows_frame.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
         self._build_volume_table_header()
-        self._volume_table.rowconfigure(0, weight=1)
+        self._volume_rows_frame = self._scrollable_frame(self._volume_table, height=320, fg_color=self._colors["field"])
+        self._volume_rows_frame.grid(row=1, column=0, sticky="nsew", padx=1, pady=(0, 1))
+        for idx, (_key, weight, _title) in enumerate(self._volume_columns):
+            self._volume_rows_frame.columnconfigure(idx, weight=weight, minsize=54)
 
     def _add_scrollable_tab(self, title: str):
-        self._notebook.add(title)
-        tab = self._notebook.tab(title)
+        tab = self._make_page(title)
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(0, weight=1)
         frame = self._scrollable_frame(tab)
@@ -729,7 +810,9 @@ class KmdrDesktopApp:
             ("size", 1, "大小 MB"),
             ("extra", 2, "状态"),
         )
-        self._build_table_header(self._volume_table, self._volume_columns)
+        self._volume_header = self._frame(self._volume_table, fg_color=self._colors["panel"])
+        self._volume_header.grid(row=0, column=0, sticky="ew", padx=1, pady=(1, 0))
+        self._build_table_header(self._volume_header, self._volume_columns)
 
     def _row_color(self, selected: bool, index: int) -> str:
         if selected:
@@ -766,8 +849,7 @@ class KmdrDesktopApp:
             self._configure_search_card_tree(child, row_color, text_color, muted_color)
 
     def _build_search_tab(self) -> None:
-        self._notebook.add("搜索")
-        frame = self._notebook.tab("搜索")
+        frame = self._make_page("搜索")
 
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
@@ -807,8 +889,7 @@ class KmdrDesktopApp:
         self._button(actions, text="搜索同作者", command=self._search_selected_author).grid(row=0, column=4, padx=(8, 0))
 
     def _build_account_tab(self) -> None:
-        self._notebook.add("账户")
-        frame = self._notebook.tab("账户")
+        frame = self._make_page("账户")
 
         for idx in range(2):
             frame.columnconfigure(idx, weight=1)
@@ -852,8 +933,7 @@ class KmdrDesktopApp:
         frame.rowconfigure(6, weight=1)
 
     def _build_config_tab(self) -> None:
-        self._notebook.add("配置")
-        frame = self._notebook.tab("配置")
+        frame = self._make_page("配置")
 
         for idx in range(3):
             frame.columnconfigure(idx, weight=1)
@@ -1035,7 +1115,7 @@ class KmdrDesktopApp:
             return
 
         self._download_book_url.set(values[3])
-        self._notebook.set("下载")
+        self._show_page("下载")
         self._parse_download_volumes()
 
     def _selected_search_item_ids(self) -> list[str]:
@@ -1422,7 +1502,6 @@ class KmdrDesktopApp:
 
     def _make_volume_row(self, item_id: str, values: tuple[str, str, str, str, str, str]) -> None:
         row_index = int(item_id)
-        grid_row = row_index + 1
         cells = []
 
         for idx, ((_, weight, _title), value) in enumerate(zip(self._volume_columns, values)):
@@ -1435,7 +1514,7 @@ class KmdrDesktopApp:
                 justify="left",
                 fg_color=self._row_color(False, row_index),
             )
-            label.grid(row=grid_row, column=idx, sticky="nsew", padx=0, pady=(0, 1), ipady=7)
+            label.grid(row=row_index, column=idx, sticky="nsew", padx=0, pady=(0, 1), ipady=7)
             label._kmdr_item_id = item_id
             cells.append(label)
 
