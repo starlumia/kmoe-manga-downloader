@@ -60,6 +60,7 @@ class KmdrSessionManager(SessionManager):
             self._base_url = await self._probing_base_url()
             # 持久化配置
             self._configurer.set_base_url(self._base_url)
+            self._configurer.update()
             debug("使用的基础 URL:", self._base_url)
             debug("使用的代理:", self._proxy)
 

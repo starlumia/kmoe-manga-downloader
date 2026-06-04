@@ -49,6 +49,12 @@ async def check_status(
         # 如果后续有性能问题，可以先考虑使用 lxml 进行解析
         soup = BeautifulSoup(await response.text(), "html.parser")
 
+        if _looks_like_login_page(soup, response):
+            raise LoginError(
+                "登录后仍然进入登录页，Cookie 未生效或当前镜像登录状态异常。请确认账号密码正确，或在配置页切换镜像站后重新登录。",
+                ["清除已保存账号后重新登录", "在配置页切换镜像站，例如 https://mox.moe 或 https://kxx.moe"],
+            )
+
         script = soup.find("script", language="javascript")
 
         if script:
@@ -63,8 +69,30 @@ async def check_status(
             is_vip = None
             user_level = None
 
-        nickname = soup.find("div", id=NICKNAME_ID).text.strip().split(" ")[0].replace("\xa0", "")
-        raw_quota = soup.find("div", id=__resolve_quota_id(is_vip, user_level)).text.strip().replace("\xa0", "")
+        nickname_node = soup.find("div", id=NICKNAME_ID)
+        if not isinstance(nickname_node, Tag):
+            raise LoginError(
+                "无法解析账户状态页：没有找到昵称区域。当前镜像可能返回了异常页面，或站点页面结构已经变化。",
+                [
+                    f"当前响应地址: {response.url}",
+                    f"页面片段: {_page_snippet(soup)}",
+                    "尝试在配置页切换镜像站后重新登录",
+                ],
+            )
+
+        quota_node = soup.find("div", id=__resolve_quota_id(is_vip, user_level))
+        if not isinstance(quota_node, Tag):
+            raise LoginError(
+                "无法解析账户状态页：没有找到额度区域。当前镜像可能返回了异常页面，或站点页面结构已经变化。",
+                [
+                    f"当前响应地址: {response.url}",
+                    f"页面片段: {_page_snippet(soup)}",
+                    "尝试在配置页切换镜像站后重新登录",
+                ],
+            )
+
+        nickname = nickname_node.text.strip().split(" ")[0].replace("\xa0", "")
+        raw_quota = quota_node.text.strip().replace("\xa0", "")
 
         if show_quota:
             if is_interactive():
@@ -99,6 +127,22 @@ def extract_var_define(script_text) -> dict[str, str]:
                 var_define[var_name.strip()] = var_value
     debug("解析到变量定义: ", var_define)
     return var_define
+
+
+def _looks_like_login_page(soup: BeautifulSoup, response) -> bool:
+    if URL(response.url).path == API_ROUTE.LOGIN:
+        return True
+
+    login_form = soup.find("form", attrs={"action": API_ROUTE.LOGIN_DO})
+    return isinstance(login_form, Tag)
+
+
+def _page_snippet(soup: BeautifulSoup, limit: int = 160) -> str:
+    title = soup.find("title")
+    title_text = title.get_text(" ", strip=True) if isinstance(title, Tag) else ""
+    body_text = soup.get_text(" ", strip=True)
+    text = " ".join(part for part in (title_text, body_text) if part)
+    return text[:limit]
 
 
 def extract_quota(soup: BeautifulSoup) -> tuple[QuotaInfo, Union[QuotaInfo, None]]:
